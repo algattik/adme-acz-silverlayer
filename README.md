@@ -293,7 +293,7 @@ The offline and fake-ADME tests need nothing else. For the live tests, run `az l
 
 The `integration` extra pins the Fabric notebook runtime versions (Python 3.13, PySpark 4.1, delta-spark 4.2, Java 21); update the pins when Fabric upgrades its Spark runtime. Keep PySpark and delta-spark on matching major versions; mixed versions fail Delta overwrites with "does not support truncate in batch mode".
 
-`tests/test_notebook_modes.py` covers selected notebook paths beyond the standard integration run: upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, output-shape helpers, and SP, DC, MI, and CLI authentication branches. The tests are broad but do not guarantee every possible setting combination or every reachable function has integration coverage.
+`tests/test_notebook_modes.py` covers selected notebook paths beyond the standard integration run: watermark-based upserts including equal-watermark rows, relationship-bridge replacement and inactive-source deletion, preserving existing bridges when bridge writes are disabled, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, output-shape helpers, and SP, DC, MI, and CLI authentication branches. The tests are broad but do not guarantee every possible setting combination or every reachable function has integration coverage.
 
 ### Optional local Spark tests
 
