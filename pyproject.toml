@@ -29,7 +29,8 @@ integration = [
   "msal",
   "azure-identity",
   "pandas",
-  "pyarrow"
+  "pyarrow",
+  "cryptography"
 ]
 
 [project.scripts]

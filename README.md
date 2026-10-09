@@ -276,7 +276,9 @@ python -m unittest discover -s tests -q
 
 ### Notebook integration tests
 
-`tests/test_notebook_integration.py` executes every code cell of the committed notebook on local Spark and Delta (`tests/notebook_runner.py` overrides the customer settings). `OfflineNotebookRunTests` use synthetic bronze rows and a stubbed schema service and token, and verify active-record filtering, child tables, relationship bridges and run metadata. `LiveNotebookRunTests` are opt-in: they call a real ADME schema service with `ADME_AUTH_METHOD = "CLI"` and compare published row counts with the active bronze records. Bronze input is regenerated from the public OSDU TNO open test data (`tests/tno_bronze.py`, pinned to a commit of the `osdu/platform/data-flow/data-loading/open-test-data` project, Well and Wellbore master data), so no tenant data is needed. Set `ADME_ACZ_LIVE_BRONZE_PATH` to use a local bronze Delta copy instead, and `ADME_ACZ_LIVE_TNO_RECORDS` (default 25) to change the number of wells and wellbores.
+`tests/test_notebook_integration.py` executes every code cell of the committed notebook on local Spark and Delta (`tests/notebook_runner.py` overrides the customer settings). `OfflineNotebookRunTests` use synthetic bronze rows and a stubbed schema service and token, and verify active-record filtering, child tables, relationship bridges and run metadata. `tests/test_notebook_tno_integration.py` runs the notebook on real Spark and Delta with public OSDU TNO records (`tests/tno_bronze.py`, pinned to a commit of the `osdu/platform/data-flow/data-loading/open-test-data` project, Well and Wellbore master data) against a fake ADME schema service. `tests/fake_adme.py` is a local HTTPS server (self-signed certificate, ports 20000-29999) that serves the public OSDU `data-definitions` schemas, bundled with their abstract schemas inlined, and checks the bearer token and `data-partition-id`. No tenant data, Azure identity or live ADME instance is involved; the first run needs network access to `community.opengroup.org` (downloads are cached in the system temporary directory). `ADME_ACZ_TNO_RECORDS` (default 10) sets the number of wells and wellbores.
+
+`LiveNotebookRunTests` are opt-in and call a real ADME schema service with `ADME_AUTH_METHOD = "CLI"`, comparing published row counts with the active bronze records. They regenerate bronze from the same TNO data, or read a local bronze Delta copy from `ADME_ACZ_LIVE_BRONZE_PATH` (tenant data; never commit it). `ADME_ACZ_LIVE_TNO_RECORDS` (default 25) sets the record count.
 
 ```shell
 az login
@@ -293,9 +295,9 @@ python -m pip install -e ".[integration]"
 python -m unittest discover -s tests -p test_notebook_integration.py -q
 ```
 
-The offline tests need nothing else. For the live tests, run `az login` first (set `AZURE_CONFIG_DIR` to use a non-default profile) and export the two `ADME_ACZ_LIVE_*` variables above. A local bronze copy exported from a tenant contains tenant data and must not be committed.
+The offline and fake-ADME tests need nothing else. For the live tests, run `az login` first (set `AZURE_CONFIG_DIR` to use a non-default profile) and export the two `ADME_ACZ_LIVE_*` variables above. A local bronze copy exported from a tenant contains tenant data and must not be committed.
 
-`.github/workflows/tests.yml` runs the unit and offline integration tests on pull requests and pushes to `main`. It does not call a live ADME instance; the live tests are skipped there and are run manually.
+`.github/workflows/tests.yml` runs the unit, offline and fake-ADME integration tests on pull requests and pushes to `main`. It does not call a live ADME instance; the live tests are skipped there and are run manually.
 
 The `integration` extra pins the Fabric notebook runtime versions (Python 3.13, PySpark 4.1, delta-spark 4.2, Java 21); update the pins when Fabric upgrades its Spark runtime. Keep PySpark and delta-spark on matching major versions; mixed versions fail Delta overwrites with "does not support truncate in batch mode".
 
