@@ -202,7 +202,78 @@ class RelationshipBridgeTests(unittest.TestCase):
                 for index in range(children.size())
             )
 
-        self.assertEqual(join_count(analyzed_plan), len(bridge_tables))
+        self.assertEqual(join_count(analyzed_plan), 1)
+
+    def test_overlapping_target_sets_preserve_exact_and_latest_resolution(self):
+        kind = "osdu:wks:master-data--Wellbore:1.0.0"
+        well_id = "osdu:master-data--Well:well-a"
+        bore_id = "osdu:master-data--Wellbore:bore-a"
+        well_kind = "osdu:wks:master-data--Well:1.0.0"
+        huge_version = "1" + "0" * 45
+        source = self.spark.createDataFrame([
+            (well_id, "000", well_kind, True),
+            (well_id, "9" * 44, well_kind, True),
+            (well_id, huge_version, well_kind, False),
+            (well_id, "not-a-version", well_kind, True),
+            (bore_id, "2", kind, None),
+            ("osdu:master-data--Other:other-a", "1", "osdu:wks:master-data--Other:1.0.0", True),
+        ], "id string, version string, kind string, isActive boolean")
+        parent = self.spark.createDataFrame([
+            ("source-a", "1", kind, well_id + ":", well_id + ":0000", bore_id + ":"),
+            ("source-b", "2", kind, bore_id + ":", "invalid", well_id + ":" + huge_version),
+            ("source-c", "1", kind, None, well_id + ":7", "osdu:master-data--Other:other-a:"),
+        ], "id string, version string, kind string, data__WellID string, data__ExactID string, data__EitherID string")
+
+        class Registry:
+            def direct_relationship_fields(self, kind):
+                well = {"GroupType": "master-data", "EntityType": "Well"}
+                bore = {"GroupType": "master-data", "EntityType": "Wellbore"}
+                return [
+                    {"field": "WellID", "targets": [well]},
+                    {"field": "ExactID", "targets": [well]},
+                    {"field": "EitherID", "targets": [bore, well]},
+                ]
+
+        result, bridge, tables = self.resolve_relationships(parent, source, Registry(), kind)
+        self.assertIs(result, parent)
+        self.assertEqual(len(tables), 4)
+        rows = bridge.collect()
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(
+            {(r.source_id, r.relationship_path, r.target_id, r.target_version, r.status) for r in rows},
+            {
+                ("source-a", "data__WellID", well_id, huge_version, "target_deleted"),
+                ("source-a", "data__ExactID", well_id, "000", "resolved"),
+                ("source-a", "data__EitherID", bore_id, "2", "resolved"),
+                ("source-b", "data__EitherID", well_id, huge_version, "target_deleted"),
+            },
+        )
+        for row in rows:
+            target_type = row.target_kind.split(":")[2]
+            self.assertEqual(
+                row._relationship_bridge_table,
+                self.bridge_table_name(kind, row.relationship_path, target_type),
+            )
+
+    def test_empty_references_retain_planned_tables_and_bridge_schema(self):
+        kind = "osdu:wks:master-data--Wellbore:1.0.0"
+        source = self.spark.createDataFrame([], "id string, version string, kind string")
+        parent = self.spark.createDataFrame(
+            [("source", "1", kind, None)],
+            "id string, version string, kind string, data__WellID string",
+        )
+
+        class Registry:
+            def direct_relationship_fields(self, kind):
+                return [{"field": "WellID", "targets": [
+                    {"GroupType": "master-data", "EntityType": "Well"},
+                ]}]
+
+        result, bridge, tables = self.resolve_relationships(parent, source, Registry(), kind)
+        self.assertIs(result, parent)
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(bridge.count(), 0)
+        self.assertEqual(bridge.schema["target_is_active"].dataType, T.BooleanType())
 
     def test_duplicate_target_identity_is_rejected(self):
         target_kind = "osdu:wks:master-data--Well:1.0.0"
