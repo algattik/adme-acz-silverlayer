@@ -111,6 +111,56 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
         self.assertEqual(["2026-01-01 00:00:00", "2026-02-01 00:00:00"], [r["watermark_value"] for r in state])
 
 
+class WatermarkedRelationshipBridgeTests(NotebookIntegrationBase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        target_kind = "osdu:wks:reference-data--FacilityType:1.0.0"
+        old_target = "test:reference-data--FacilityType:old"
+        deleted_source_target = "test:reference-data--FacilityType:deleted-source"
+        new_target = "test:reference-data--FacilityType:new"
+        write_bronze(cls.spark, [
+            row("test:well:1", "1", {"FacilityName": "Alpha", "FacilityTypeID": old_target + ":"}),
+            row("test:well:2", "1", {"FacilityName": "Beta", "FacilityTypeID": deleted_source_target + ":"}),
+            row(old_target, "1", {"Name": "Old"}, kind=target_kind),
+            row(deleted_source_target, "1", {"Name": "Deleted source target"}, kind=target_kind),
+            row(new_target, "1", {"Name": "New"}, kind=target_kind),
+        ])
+        cls.settings = {
+            "RUN_PROFILE": "execute", "KINDS": [WELL_KIND], "TABLE_PREFIX": "wm_bridge_",
+            "WRITE_MODE": "upsert", "VERSION_STRATEGY": "merge", "INCREMENTAL_WATERMARK_MODE": "auto",
+        }
+        run(cls.spark, cls.settings)
+        cls.spark.createDataFrame([
+            row("test:well:1", "2", {"FacilityName": "Alpha updated", "FacilityTypeID": new_target + ":"},
+                ingest=LATER),
+        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+        cls.spark.sql(
+            f"UPDATE osducatalog SET isActive = false, "
+            f"ingestTime = TIMESTAMP '{LATER:%Y-%m-%d %H:%M:%S}' WHERE id = 'test:well:2'"
+        )
+        cls.namespace = run(cls.spark, cls.settings)
+        bridge_tables = [
+            table.name for table in cls.spark.catalog.listTables()
+            if table.name.startswith("wm_bridge_relationship__")
+        ]
+        if len(bridge_tables) != 1:
+            raise AssertionError(f"Expected one relationship bridge table, found {bridge_tables}")
+        cls.bridge_table = bridge_tables[0]
+
+    def test_watermark_upsert_replaces_changed_source_bridge_rows_and_removes_inactive_sources(self):
+        rows = self.read(self.bridge_table).collect()
+        self.assertEqual(
+            {
+                ("test:well:1", "1", "test:reference-data--FacilityType:old"),
+                ("test:well:1", "2", "test:reference-data--FacilityType:new"),
+            },
+            {(row.source_id, row.source_version, row.target_id) for row in rows},
+        )
+        self.assertTrue(all(row.status == "resolved" for row in rows))
+        self.assertTrue(all(row.target_version == "1" for row in rows))
+
+
 class WideVersionedOutputTests(NotebookIntegrationBase):
     @classmethod
     def setUpClass(cls):
