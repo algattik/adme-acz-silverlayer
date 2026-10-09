@@ -14,8 +14,9 @@ from test_normalization import ROOT, T, java_is_available
 if T is not None:
     from py4j.protocol import Py4JJavaError
     from pyspark.sql import SparkSession
-    from adme_acz_silverlayer.reference_notebook import build_reference_notebook
+    from adme_acz_silverlayer.silver import build_silver, release_silver
     from adme_acz_silverlayer.silver_publish import read_pinned_source
+    from adme_acz_silverlayer.silver_publish import publish_silver
 
 
 @unittest.skipIf(T is None or importlib.util.find_spec("delta") is None,
@@ -49,7 +50,7 @@ class DeltaSilverTests(unittest.TestCase):
         cls.addClassCleanup(cls.spark.stop)
         cls.spark.sparkContext.setLogLevel("ERROR")
 
-    def test_pinned_input_and_real_delta_publication_from_generated_helpers(self):
+    def test_pinned_input_and_real_delta_publication(self):
         kind = "example:wks:master-data--Asset:1.0.0"
         source_path = str(Path(self.temporary.name) / "source")
         self.spark.createDataFrame([
@@ -65,10 +66,6 @@ class DeltaSilverTests(unittest.TestCase):
         self.assertEqual(snapshot["source_delta_version"], 0)
         self.assertTrue(snapshot["source_path"].startswith("file:"))
         self.assertEqual(pinned.count(), 1)
-        namespace = {"__name__": "__main__"}
-        for cell in build_reference_notebook()["cells"]:
-            if cell["cell_type"] == "code" and cell["metadata"].get("collapsed"):
-                exec(compile("".join(cell["source"]), "<generated-reference>", "exec"), namespace)
         schemas = {kind: {"x-osdu-schema-source": kind, "type": "object", "properties": {
             "data": {"type": "object", "properties": {
                 "Name": {"type": "string"},
@@ -82,9 +79,9 @@ class DeltaSilverTests(unittest.TestCase):
                 }}},
             }}
         }}}
-        result = namespace["build_silver"](pinned, schemas, "real-delta")
+        result = build_silver(pinned, schemas, "real-delta")
         try:
-            event = namespace["publish_silver"](
+            event = publish_silver(
                 result, snapshot, self.temporary.name + "/tables", self.temporary.name + "/journal",
             )
             self.assertEqual(event["status"], "succeeded")
@@ -108,11 +105,11 @@ class DeltaSilverTests(unittest.TestCase):
             self.assertEqual(entry_rows[0]["value__Pointer_name"], "test:master-data--Asset:a:")
             self.assertTrue(entry_rows[1]["_silver_element_is_null"])
             with self.assertRaises(Py4JJavaError):
-                namespace["publish_silver"](
+                publish_silver(
                     result, snapshot, self.temporary.name + "/tables", self.temporary.name + "/journal",
                 )
         finally:
-            namespace["release_silver"](result)
+            release_silver(result)
 
 
 if __name__ == "__main__":

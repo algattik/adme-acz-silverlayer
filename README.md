@@ -276,11 +276,13 @@ python -m unittest discover -s tests -q
 
 ### Notebook integration tests
 
-`tests/test_notebook_integration.py` executes every code cell of the committed notebook on local Spark and Delta (`tests/notebook_runner.py` overrides the customer settings). `OfflineNotebookRunTests` use synthetic bronze rows and a stubbed schema service and token, and verify active-record filtering, child tables, relationship bridges and run metadata. `LiveNotebookRunTests` are opt-in: they read a local copy of an ACZ bronze Delta table, call a real ADME schema service with `ADME_AUTH_METHOD = "CLI"`, and compare published row counts with the active bronze records.
+`tests/test_notebook_integration.py` executes every code cell of the committed notebook on local Spark and Delta (`tests/notebook_runner.py` overrides the customer settings). `OfflineNotebookRunTests` use synthetic bronze rows and a stubbed schema service and token, and verify active-record filtering, child tables, relationship bridges and run metadata. `LiveNotebookRunTests` are opt-in: they call a real ADME schema service with `ADME_AUTH_METHOD = "CLI"` and compare published row counts with the active bronze records. Bronze input is regenerated from the public OSDU TNO open test data (`tests/tno_bronze.py`, pinned to a commit of the `osdu/platform/data-flow/data-loading/open-test-data` project, Well and Wellbore master data), so no tenant data is needed. Set `ADME_ACZ_LIVE_BRONZE_PATH` to use a local bronze Delta copy instead, and `ADME_ACZ_LIVE_TNO_RECORDS` (default 25) to change the number of wells and wellbores.
 
 ```shell
-ADME_ACZ_LIVE_BRONZE_PATH=<local bronze delta path> ADME_ACZ_LIVE_ENDPOINT=https://<instance>.energy.azure.com ADME_ACZ_LIVE_PARTITION=<partition> \
+az login
+ADME_ACZ_LIVE_ENDPOINT=https://<instance>.energy.azure.com ADME_ACZ_LIVE_PARTITION=<partition> \
   python -m unittest discover -s tests -p test_notebook_integration.py -q
+python tests/tno_bronze.py --output /tmp/tno-bronze --wells 5 --wellbores 5   # write the bronze table only
 ```
 
 From a clean checkout (Python 3.13 and a Java 21 runtime on `PATH` or `JAVA_HOME`; the first run downloads the Delta jar from Maven Central):
@@ -291,7 +293,9 @@ python -m pip install -e ".[integration]"
 python -m unittest discover -s tests -p test_notebook_integration.py -q
 ```
 
-The offline tests need nothing else. The live tests need a local Delta copy of an ACZ bronze table (for example exported from the lakehouse) at `ADME_ACZ_LIVE_BRONZE_PATH`; it contains tenant data and must not be committed. For the live tests, run `az login` first (set `AZURE_CONFIG_DIR` to use a non-default profile) and export the three `ADME_ACZ_LIVE_*` variables above.
+The offline tests need nothing else. For the live tests, run `az login` first (set `AZURE_CONFIG_DIR` to use a non-default profile) and export the two `ADME_ACZ_LIVE_*` variables above. A local bronze copy exported from a tenant contains tenant data and must not be committed.
+
+`.github/workflows/tests.yml` runs the unit and offline integration tests on pull requests and pushes to `main`. It does not call a live ADME instance; the live tests are skipped there and are run manually.
 
 The `integration` extra pins the Fabric notebook runtime versions (Python 3.13, PySpark 4.1, delta-spark 4.2, Java 21); update the pins when Fabric upgrades its Spark runtime. Keep PySpark and delta-spark on matching major versions; mixed versions fail Delta overwrites with "does not support truncate in batch mode".
 

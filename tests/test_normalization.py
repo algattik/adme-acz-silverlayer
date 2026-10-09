@@ -1,6 +1,7 @@
 """Synthetic Spark transformations; no ADME, Fabric, or Delta writes."""
 
 import ast
+import importlib.util
 import json
 import logging
 import os
@@ -96,7 +97,7 @@ class SparkNormalizationTests(unittest.TestCase):
         })
         cls.python_environment.start()
         try:
-            cls.spark = (
+            builder = (
                 SparkSession.builder.master("local[2]")
                 .appName("adme-normalization-tests")
                 .config("spark.ui.enabled", "false")
@@ -104,8 +105,18 @@ class SparkNormalizationTests(unittest.TestCase):
                 .config("spark.driver.bindAddress", "127.0.0.1")
                 .config("spark.sql.shuffle.partitions", "2")
                 .config("spark.sql.warehouse.dir", cls.temporary.name)
-                .getOrCreate()
             )
+            if importlib.util.find_spec("delta") is not None:
+                from delta import configure_spark_with_delta_pip
+
+                builder = builder.config(
+                    "spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension"
+                ).config(
+                    "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+                )
+                # The first Spark context owns the JVM classpath for the test process.
+                builder = configure_spark_with_delta_pip(builder)
+            cls.spark = builder.getOrCreate()
         except Exception:
             cls.temporary.cleanup()
             cls.python_environment.stop()
