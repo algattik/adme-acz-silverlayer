@@ -5,6 +5,7 @@ import os
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
@@ -149,6 +150,50 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertTrue(all(cell["cell_type"] in {"markdown", "code"} for cell in self.nb["cells"]))
         self.assertTrue(all(not cell.get("outputs") for cell in self.nb["cells"] if cell["cell_type"] == "code"))
 
+    def test_implementation_only_cells_are_hidden(self) -> None:
+        utility_sections = {
+            "## Pipeline constants",
+            "## Helper functions",
+            "### Schema service, authentication, and cache helpers",
+            "### Schema registry and child table naming helpers",
+            "### Delta column sanitization and schema inference helpers",
+            "### Envelope extraction, column classification, and child builders",
+            "### JSON flattening and kind decomposition",
+            "### Wide reassembly and output documentation schema helpers",
+            "### Delta table safety, incremental state, and inactive deletes",
+            "### Data-quality and output-documentation write helpers",
+            "### Single-kind processing",
+            "### Kind-group processing",
+            "### Kind grouping, metadata rows, and build-plan validation",
+            "### Kind selector resolution and output preview",
+            "### Setup checklist implementation",
+            "### Dry-run implementation",
+            "### Pipeline execution orchestration",
+        }
+        section = None
+        hidden_cells = []
+        for cell in self.nb["cells"]:
+            if cell["cell_type"] == "markdown":
+                headings = [
+                    line.strip()
+                    for line in "".join(cell.get("source", [])).splitlines()
+                    if line.startswith("#")
+                ]
+                if headings:
+                    section = headings[0]
+                continue
+            if cell["cell_type"] != "code":
+                continue
+            metadata = cell.get("metadata", {})
+            if section in utility_sections:
+                self.assertTrue(metadata.get("collapsed"))
+                self.assertTrue(metadata.get("jupyter", {}).get("source_hidden"))
+                hidden_cells.append(section)
+            else:
+                self.assertFalse(metadata.get("jupyter", {}).get("source_hidden"))
+
+        self.assertEqual(set(hidden_cells), utility_sections)
+
     def test_setup_and_smoke_tests_precede_pipeline_execution(self) -> None:
         heading_positions = dict(markdown_headings(self.nb))
         setup = next(index for index, heading in heading_positions.items() if heading == "## Setup checklist")
@@ -165,8 +210,27 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("ADME_OUTPUT_MODE", source)
         self.assertIn("ADME_REASSEMBLE", source)
         self.assertIn("Output mode", source)
-        self.assertIn('RUN_PROFILE = "interactive"', source)
+        self.assertIn('RUN_PROFILE = "inspect"', source)
         self.assertIn('"dry_run"', source)
+
+    def test_run_profile_values_are_explicit(self) -> None:
+        source = notebook_source(self.nb, "code")
+        self.assertIn('{"inspect", "dry_run", "execute"}', source)
+        self.assertIn(
+            'raise ValueError("RUN_PROFILE must be \'inspect\', \'dry_run\', or \'execute\'.")',
+            source,
+        )
+        self.assertIn('elif run_profile == "execute":', source)
+        self.assertNotIn('run_profile == "interactive"', source)
+        self.assertNotIn('run_profile == "full"', source)
+        self.assertIn("# Run stage. Start with inspect, then dry_run, then execute.", source)
+        markdown = notebook_source(self.nb, "markdown")
+        self.assertIn("`inspect`: print effective settings and next steps", markdown)
+        self.assertIn("`execute`: run the configured pipeline.", markdown)
+        self.assertNotIn("`interactive`: print current settings", markdown)
+        self.assertNotIn("`full`: process the configured kinds", markdown)
+        self.assertNotIn("full pipeline", markdown.lower())
+        self.assertNotIn("full execution", notebook_source(self.nb).lower())
 
     def test_delta_column_name_sanitizer_handles_schema_placeholders(self) -> None:
         funcs = extract_functions(
@@ -214,6 +278,9 @@ class NotebookSimplificationTests(unittest.TestCase):
             'os.environ.get("ADME_SP_SECRET_NAME")',
             'NOTEBOOK_VERSION = "0.5.6"',
             "ALLOW_OVERWRITE = False",
+            "WRITE_RELATIONSHIP_BRIDGES = True",
+            "ADME_WRITE_RELATIONSHIP_BRIDGES",
+            'write_relationship_bridges = _env_bool("ADME_WRITE_RELATIONSHIP_BRIDGES", WRITE_RELATIONSHIP_BRIDGES)',
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
             "ADME_ALLOW_OVERWRITE",
@@ -233,7 +300,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
             'RUN_MANIFEST_TABLE = "silver_run_manifest"',
             'RUN_STATUS_TABLE = "silver_run_status"',
-            'schema_cache_writes_enabled = persist_schema_cache and run_profile == "full"',
+            'schema_cache_writes_enabled = persist_schema_cache and run_profile == "execute"',
             "ADME_PERSIST_SCHEMA_CACHE",
             "ADME_SCHEMA_CACHE_TABLE",
             "ADME_RUN_MANIFEST_TABLE",
@@ -304,6 +371,84 @@ class NotebookSimplificationTests(unittest.TestCase):
             '_check_row("active record filter"',
         ]:
             self.assertIn(expected, source)
+
+    def test_customer_settings_are_separate_from_configuration_code(self) -> None:
+        code_cells = [cell for cell in self.nb["cells"] if cell["cell_type"] == "code"]
+        config_index = next(
+            index for index, cell in enumerate(code_cells)
+            if 'WORKSPACE_ID = ""' in "".join(cell["source"])
+        )
+        config_source = "".join(code_cells[config_index]["source"])
+        runtime_source = "".join(code_cells[config_index + 1]["source"])
+
+        self.assertNotIn("import ", config_source)
+        self.assertNotIn("def ", config_source)
+        self.assertIn("def _resolve_workspace_id(", runtime_source)
+        self.assertNotIn('WORKSPACE_ID = ""', runtime_source)
+
+    def test_relationship_bridge_is_part_of_the_pipeline_output_contract(self) -> None:
+        source = notebook_source(self.nb, "code")
+
+        self.assertIn("def relationship_bridge_table_name(", source)
+        self.assertIn('alias("_relationship_bridge_table")', source)
+        self.assertIn("relationship_bridge_frames_for_tables(", source)
+        self.assertIn("def resolve_direct_relationships(", source)
+        self.assertIn("relationship_frames=relationship_frames", source)
+        self.assertIn("relationship_changed_key_frames=relationship_changed_key_frames", source)
+        self.assertIn("relationship_bridge_tables=relationship_bridge_tables", source)
+        self.assertIn('["source_id", "source_version", "source_kind"]', source)
+        self.assertNotIn("__fk_id", source)
+        self.assertNotIn("__fk_version", source)
+
+    def test_relationship_bridge_flag_controls_resolution_and_is_reported(self) -> None:
+        source = notebook_source(self.nb, "code")
+        for expected in [
+            '"write_relationship_bridges": write_relationship_bridges',
+            "if write_relationship_bridges and registry.direct_relationship_fields(kind):",
+            "if schema_registry and write_relationship_bridges:",
+            'row["relationship_bridges_enabled"] and row["schema_resolved"]',
+            'T.StructField("relationship_bridges_enabled", T.BooleanType(), True)',
+            "relationship_bridges_enabled,",
+            "write_relationship_bridges=write_relationship_bridges",
+        ]:
+            self.assertIn(expected, source)
+
+    def test_run_manifest_records_disabled_relationship_bridges(self) -> None:
+        run_manifest_row = extract_function(self.nb, "run_manifest_row")
+
+        class Clock:
+            @staticmethod
+            def now(_timezone):
+                return "created-at"
+
+        run_manifest_row.__globals__.update({
+            "UTC": None,
+            "datetime": Clock,
+            "kind_family_key": lambda kind: kind,
+            "kind_version": lambda kind: "1.0.0",
+            "version_strategy": "merge",
+            "output_docs_mode": "summary",
+            "persist_schema_cache": True,
+            "cache_bronze": True,
+            "include_inactive_records": False,
+        })
+        result = SimpleNamespace(
+            kind="osdu:wks:master-data--Well:1.0.0",
+            child_tables=[],
+            schema_mode="resolved",
+            parent_table="well",
+            records_processed=1,
+            status="success",
+            error=None,
+            quality_status="passed",
+            quality_issue_count=0,
+        )
+        row = run_manifest_row(
+            "run-id", result, "normalized", "", "osducatalog", "execute", "0.5.6",
+            "config-hash", False, "upsert", ["id", "version"], None, "off", False,
+        )
+
+        self.assertFalse(row[-1])
 
     def test_setup_checklist_dry_run_and_manifest_are_present(self) -> None:
         source = notebook_source(self.nb, "code")

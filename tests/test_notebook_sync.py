@@ -1,7 +1,10 @@
 import copy
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +44,78 @@ class NotebookSyncTests(unittest.TestCase):
         self.assertGreaterEqual(summary.code_cells, 1)
         self.assertGreaterEqual(summary.markdown_cells, 1)
         self.assertIn("## Run pipeline", summary.headings)
+
+    def test_shared_helper_sync_is_idempotent(self) -> None:
+        nb = notebook_sync.load_notebook(NOTEBOOK)
+        synchronized = notebook_sync.synchronize_shared_helpers(nb)
+        self.assertEqual(synchronized, nb)
+        self.assertEqual(notebook_sync.synchronize_shared_helpers(synchronized), synchronized)
+
+    def test_shared_helper_drift_is_detected_and_repaired(self) -> None:
+        nb = notebook_sync.load_notebook(NOTEBOOK)
+        dirty = copy.deepcopy(nb)
+        cell = next(
+            cell for cell in dirty["cells"]
+            if "def _flatten_typed_structs(" in "".join(cell.get("source", []))
+        )
+        cell["source"] = "".join(cell["source"]).replace(
+            "return parent.select(select_exprs)", "return parent.select(select_exprs).limit(1)"
+        ).splitlines(keepends=True)
+        self.assertNotEqual(dirty, nb)
+        self.assertIn(
+            "Shared Spark helpers differ from the package source; run scripts/sync_notebook.py.",
+            notebook_sync.validation_issues(dirty),
+        )
+        self.assertEqual(notebook_sync.synchronize_shared_helpers(dirty), nb)
+
+    def test_check_reports_helper_drift_without_writing(self) -> None:
+        nb = notebook_sync.load_notebook(NOTEBOOK)
+        cell = next(
+            cell for cell in nb["cells"]
+            if "def _flatten_typed_structs(" in "".join(cell.get("source", []))
+        )
+        cell["source"] = "".join(cell["source"]).replace(
+            "return parent.select(select_exprs)", "return parent.select(select_exprs).limit(1)"
+        ).splitlines(keepends=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "notebook.ipynb"
+            notebook_sync.write_notebook(path, nb)
+            before = path.read_bytes()
+            with mock.patch("sys.stderr", new=io.StringIO()) as errors:
+                self.assertEqual(notebook_sync.main([str(path), "--check"]), 1)
+            self.assertIn("not synchronized", errors.getvalue())
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(notebook_sync.sync_notebook(path))
+            self.assertFalse(notebook_sync.sync_notebook(path, check=True))
+
+    def test_shared_type_constants_are_synchronized(self) -> None:
+        nb = notebook_sync.load_notebook(NOTEBOOK)
+        dirty = copy.deepcopy(nb)
+        cell = next(
+            cell for cell in dirty["cells"]
+            if "_JSON_TYPE_MAP:" in "".join(cell.get("source", []))
+        )
+        cell["source"] = "".join(cell["source"]).replace(
+            '"integer": T.LongType()', '"integer": T.StringType()'
+        ).splitlines(keepends=True)
+        self.assertNotEqual(dirty, nb)
+        self.assertEqual(notebook_sync.synchronize_shared_helpers(dirty), nb)
+
+    def test_missing_or_duplicate_shared_helpers_fail_explicitly(self) -> None:
+        nb = notebook_sync.load_notebook(NOTEBOOK)
+        cell = next(
+            cell for cell in nb["cells"]
+            if "def _flatten_typed_structs(" in "".join(cell.get("source", []))
+        )
+        duplicate = copy.deepcopy(nb)
+        duplicate["cells"].append(copy.deepcopy(cell))
+        with self.assertRaisesRegex(ValueError, "occurs more than once"):
+            notebook_sync.synchronize_shared_helpers(duplicate)
+        cell["source"] = "".join(cell["source"]).replace(
+            "def _flatten_typed_structs(", "def unsupported_flatten("
+        ).splitlines(keepends=True)
+        with self.assertRaisesRegex(ValueError, "missing shared helper"):
+            notebook_sync.synchronize_shared_helpers(nb)
 
 
 if __name__ == "__main__":

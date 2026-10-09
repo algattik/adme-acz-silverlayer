@@ -12,8 +12,8 @@ DEFAULT_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504]
 
 def adme_auth_method(method: str | None = None, fallback_method: str | None = None) -> str:
     normalized = str(method or fallback_method or "SP").strip().upper()
-    if normalized not in {"SP", "DC", "MI"}:
-        raise ValueError("ADME_AUTH_METHOD must be 'SP', 'DC', or 'MI'.")
+    if normalized not in {"SP", "DC", "MI", "CLI"}:
+        raise ValueError("ADME_AUTH_METHOD must be 'SP', 'DC', 'MI', or 'CLI'.")
     return normalized
 
 

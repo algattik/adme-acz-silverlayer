@@ -7,7 +7,13 @@ __all__ = [
     "fabric_io",
     "metadata",
     "naming",
+    "normalization",
     "notebook_sync",
+    "reference_notebook",
     "runtime",
     "schema",
+    "schema_contract",
+    "silver",
+    "silver_publish",
+    "spark_schema",
 ]

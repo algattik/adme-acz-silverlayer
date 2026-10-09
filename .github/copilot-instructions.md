@@ -18,7 +18,7 @@ This project is Azure/Fabric/ADME-focused. When MCP tools are available, use Azu
 
 ## High-level architecture
 
-The customer-facing deliverable is `ADME ACZ Silver Layer.ipynb`. It reads ACZ bronze OSDU records from a Fabric/OneLake Delta table, unwraps the Storage record envelope in the bronze `data` payload, resolves kind schemas from the ADME schema service, flattens/reassembles nested JSON, and writes Silver Layer Delta outputs plus run metadata.
+The customer-facing deliverable is `ADME ACZ Silver Layer.ipynb`. It reads ACZ bronze OSDU records from a Fabric/OneLake Delta table, unwraps the Storage record envelope in the bronze `data` payload, resolves kind schemas from the ADME schema service, flattens/reassembles nested JSON, and writes Silver Layer Delta outputs plus run metadata. Normalize envelope `createTime` and `modifyTime` epoch-millisecond values to timestamps when the corresponding bronze columns are timestamp-typed.
 
 `src/adme_acz_silverlayer/` contains local-development helpers for behavior that also exists in the notebook: configuration parsing, table naming, JSON Schema compatibility, Fabric/OneLake boundaries, ADME auth/schema URLs, bronze active-record filtering, runtime safety checks, metadata helpers, and notebook synchronization. The notebook must stay self-contained for Fabric import; customer runtime code must not import `adme_acz_silverlayer`.
 
@@ -26,9 +26,12 @@ The notebook execution sections are a tested contract: Spark runtime configurati
 
 Outputs support two main shapes: `normalized` creates parent tables plus child tables for arrays, while `wide` creates one reassembled table per kind. Schema versions are either kept as physical `versioned_tables` with `__v1_2_0` suffixes or grouped by family with `merge`. Upsert mode uses merge keys, defaults to `["id", "version"]`, and can use the ACZ `ingestTime` watermark to prune changed kinds before schema access.
 
+Schema-declared scalar relationships remain as raw values on parent rows. When `WRITE_RELATIONSHIP_BRIDGES` is enabled, they are published to bridge tables keyed by source kind, relationship path, and declared target type; when disabled, skip bridge planning, resolution, and writes without deleting existing tables. With schema preflight enabled, reuse one narrow cached Bronze identity lookup (`id`, `version`, `kind`, `isActive`) across relationship-bearing groups and release it after the build. Resolve each relationship path from the original parent frame rather than chaining joins across paths, to keep the Spark plan linear in the number of relationships. Do not add duplicate foreign-key columns to parent outputs; include enabled bridge table names in result manifests and output documentation, and record the enabled state in the run manifest.
+
 ## Repository-specific conventions
 
 - When changing notebook logic that has an extracted helper in `src/adme_acz_silverlayer/`, keep the notebook and helper behavior in sync. Tests such as `test_extracted_modules.py`, `test_runtime_boundary_modules.py`, and `test_runtime_metadata_modules.py` compare extracted notebook functions with package helpers.
+- Local Spark/Delta test sessions bind their driver and local IP to `127.0.0.1` and set worker Python to the running interpreter. Scope environment patches and cleanup to the test class; an installed but broken runtime fails rather than silently skipping.
 - Keep committed notebooks clean: no code-cell outputs, no execution counts, only markdown/code cells, expected headings in order, and no runtime imports from `adme_acz_silverlayer`. Use `scripts\sync_notebook.py --check --summary` before committing notebook edits.
 - Preserve table naming helpers instead of adding ad hoc naming: OSDU kinds map through `kind_to_table_name`, child tables use `{parent}___{full_array_path}`, and versioned tables append `__v<version>`.
 - Active bronze records are the default contract. `INCLUDE_INACTIVE_RECORDS = False` requires an `isActive` column and filters to `isActive == true`; inactive rows in watermark upsert flows are handled as deletes unless inactive records are explicitly included.
