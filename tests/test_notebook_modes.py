@@ -26,6 +26,7 @@ from tno_bronze import BRONZE_DDL
 WELLBORE_KIND = "osdu:wks:master-data--Wellbore:1.0.0"
 EARLIER = datetime(2026, 1, 1, tzinfo=timezone.utc)
 LATER = datetime(2026, 2, 1, tzinfo=timezone.utc)
+LATEST = datetime(2026, 3, 1, tzinfo=timezone.utc)
 
 
 def row(record_id, version, payload, kind=WELL_KIND, active=True, ingest=EARLIER):
@@ -114,6 +115,92 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
     def test_watermark_state_records_the_latest_ingest_time(self):
         state = self.read("silver_incremental_state").orderBy("updated_at").collect()
         self.assertEqual(["2026-01-01 00:00:00", "2026-02-01 00:00:00"], [r["watermark_value"] for r in state])
+
+
+class WatermarkedRelationshipBridgeTests(NotebookIntegrationBase):
+    KIND = "osdu:wks:master-data--Wellbore:1.0.0"
+    TARGET_KIND = "osdu:wks:reference-data--FacilityType:1.0.0"
+    TARGET_ID = "test:reference-data--FacilityType:well"
+    OTHER_TARGET_ID = "test:reference-data--FacilityType:bore"
+    SETTINGS = {
+        "RUN_PROFILE": "execute", "KINDS": [KIND], "TABLE_PREFIX": "wmbridge_",
+        "WRITE_MODE": "upsert", "VERSION_STRATEGY": "merge", "INCREMENTAL_WATERMARK_MODE": "auto",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        write_bronze(cls.spark, [
+            row("test:wellbore:1", "1", {"FacilityTypeID": cls.TARGET_ID + ":"}, kind=cls.KIND),
+            row(cls.TARGET_ID, "1", {"FacilityName": "Well"}, kind=cls.TARGET_KIND),
+            row(cls.OTHER_TARGET_ID, "1", {"FacilityName": "Bore"}, kind=cls.TARGET_KIND),
+        ])
+        run(cls.spark, cls.SETTINGS)
+        cls.bridge_table = next(
+            name for name in (table.name for table in cls.spark.catalog.listTables())
+            if name.startswith("wmbridge_relationship__") and name.endswith("facilitytype")
+        )
+        cls.spark.createDataFrame([
+            row("test:wellbore:1", "1", {"FacilityTypeID": cls.OTHER_TARGET_ID + ":"},
+                kind=cls.KIND, ingest=LATER),
+        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+        run(cls.spark, cls.SETTINGS)
+        cls.bridge_after_source_update = cls.spark.table(cls.bridge_table).collect()
+        cls.spark.createDataFrame([
+            row("test:wellbore:1", "1", {"FacilityTypeID": cls.OTHER_TARGET_ID + ":"},
+                kind=cls.KIND, active=False, ingest=LATEST),
+        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+        run(cls.spark, cls.SETTINGS)
+
+    def test_watermarked_source_change_replaces_its_bridge_row(self):
+        rows = self.bridge_after_source_update
+        self.assertEqual(1, len(rows))
+        self.assertEqual(
+            (self.OTHER_TARGET_ID, self.OTHER_TARGET_ID + ":", "resolved"),
+            (rows[0]["target_id"], rows[0]["raw_reference"], rows[0]["status"]),
+        )
+        self.assertEqual("test:wellbore:1", rows[0]["source_id"])
+
+    def test_watermarked_inactive_source_deletes_its_bridge_row(self):
+        self.assertEqual(0, self.read(self.bridge_table).count())
+
+
+class WatermarkedRelationshipBridgeDisabledTests(NotebookIntegrationBase):
+    KIND = "osdu:wks:master-data--Wellbore:2.0.0"
+    TARGET_KIND = "osdu:wks:reference-data--FacilityType:1.0.0"
+    TARGET_ID = "test:reference-data--FacilityType:disabled"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.settings = {
+            "RUN_PROFILE": "execute", "KINDS": [cls.KIND], "TABLE_PREFIX": "wmnobridge_",
+            "WRITE_MODE": "upsert", "VERSION_STRATEGY": "merge", "INCREMENTAL_WATERMARK_MODE": "auto",
+            "WRITE_RELATIONSHIP_BRIDGES": True,
+        }
+        write_bronze(cls.spark, [
+            row("test:wellbore:disabled", "1", {"FacilityTypeID": cls.TARGET_ID + ":"}, kind=cls.KIND),
+            row(cls.TARGET_ID, "1", {"FacilityName": "Disabled"}, kind=cls.TARGET_KIND),
+        ])
+        run(cls.spark, cls.settings)
+        cls.bridge_table = next(
+            name for name in (table.name for table in cls.spark.catalog.listTables())
+            if name.startswith("wmnobridge_relationship__") and name.endswith("facilitytype")
+        )
+        cls.settings["WRITE_RELATIONSHIP_BRIDGES"] = False
+        cls.spark.createDataFrame([
+            row("test:wellbore:disabled", "2", {"FacilityTypeID": "test:reference-data--FacilityType:other:"},
+                kind=cls.KIND, ingest=LATER),
+        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+        run(cls.spark, cls.settings)
+
+    def test_disabling_bridges_keeps_parent_updates_and_does_not_delete_existing_bridge_tables(self):
+        parent = self.read("wmnobridge_osdu_wks_wellbore")
+        current = parent.where("version = '2'").first()
+        self.assertEqual("test:reference-data--FacilityType:other:", current["data__FacilityTypeID"])
+        bridge_rows = self.read(self.bridge_table).collect()
+        self.assertEqual(1, len(bridge_rows))
+        self.assertEqual(self.TARGET_ID + ":", bridge_rows[0]["raw_reference"])
 
 
 class WideVersionedOutputTests(NotebookIntegrationBase):
