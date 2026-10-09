@@ -91,7 +91,7 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
         cls.spark.sql(f"UPDATE osducatalog SET isActive = false, ingestTime = TIMESTAMP '{LATER:%Y-%m-%d %H:%M:%S}' "
                       "WHERE id = 'test:well:2'")
         cls.namespace = run(cls.spark, cls.SETTINGS)
-        cls.second_keys = keys(cls.read("up_osdu_wks_well"))
+        cls.second_keys = keys(cls.spark.table("up_osdu_wks_well"))
         cls.spark.createDataFrame([
             row("test:well:5", "1", {"FacilityName": "Epsilon", "NameAliases": []}, ingest=LATER),
         ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
