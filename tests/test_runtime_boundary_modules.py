@@ -147,6 +147,10 @@ class RuntimeBoundaryModuleTests(unittest.TestCase):
         self.assertEqual(adme_schema.adme_auth_method("sp"), funcs["_adme_auth_method"]())
         funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "MI"
         self.assertEqual(adme_schema.adme_auth_method("MI"), funcs["_adme_auth_method"]())
+        for method in ("DC", "CLI"):
+            funcs["_adme_auth_method"].__globals__["adme_auth_method"] = method
+            self.assertEqual(adme_schema.adme_auth_method(method.lower()), funcs["_adme_auth_method"]())
+        funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "MI"
         with self.assertRaises(ValueError):
             adme_schema.adme_auth_method("invalid")
 
