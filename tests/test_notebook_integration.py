@@ -48,9 +48,9 @@ WELL_SCHEMA = {
     },
 }
 
-def bronze_row(record_id, version, payload, active=True, kind=WELL_KIND):
+def bronze_row(record_id, version, payload, active=True, kind=WELL_KIND, modify_time=1760000000000):
     return (
-        json.dumps({"data": payload, "meta": None, "modifyUser": "buildagent", "modifyTime": 1760000000000}), None, record_id, version, kind, None, None, None,
+        json.dumps({"data": payload, "meta": None, "modifyUser": "buildagent", "modifyTime": modify_time}), None, record_id, version, kind, None, None, None,
         "buildagent", None, None, None, None, None, None, None, active,
     )
 
@@ -122,6 +122,14 @@ class OfflineNotebookRunTests(NotebookIntegrationBase):
         def stub_services(namespace):
             namespace["get_adme_access_token"] = lambda: "unit-test-token"
             namespace["_adme_schema_get_json"] = serve_schema
+            namespace["_silver_write_batches"] = []
+            write_silver_tables = namespace["write_silver_tables"]
+
+            def capture_write_batch(writes, mode="overwrite", parallelism=None):
+                namespace["_silver_write_batches"].append([target for _, target in writes])
+                return write_silver_tables(writes, mode=mode, parallelism=parallelism)
+
+            namespace["write_silver_tables"] = capture_write_batch
 
         cls.displayed = []
         cls.schema_urls = schema_urls
@@ -135,6 +143,7 @@ class OfflineNotebookRunTests(NotebookIntegrationBase):
             "ALLOW_OVERWRITE": True,
             "WRITE_MODE": "full_refresh",
             "VERSION_STRATEGY": "merge",
+            "OUTPUT_WRITE_PARALLELISM": 2,
         }, before_pipeline=stub_services, displayed=cls.displayed)
 
     def test_schema_service_was_queried_for_the_selected_kind(self):
@@ -150,6 +159,12 @@ class OfflineNotebookRunTests(NotebookIntegrationBase):
         row = normalized.where("id = 'test:well:1'").selectExpr("unix_timestamp(modifyTime) AS epoch_seconds").first()
         self.assertEqual(1760000000, row["epoch_seconds"])
 
+    def test_invalid_wrapper_timestamp_does_not_abort_normalization(self):
+        record = bronze_row("test:well:invalid-time", "1", {"FacilityName": "Invalid"}, modify_time="0")
+        source = self.spark.createDataFrame([record], BRONZE_DDL)
+        normalized = self.namespace["_normalize_bronze_record_wrapper"](source)
+        self.assertIsNone(normalized.select("modifyTime").first()["modifyTime"])
+
     def test_array_elements_become_child_rows_keyed_by_parent(self):
         aliases = self.read("it_osdu_wks_well___namealiases").collect()
         self.assertEqual({"A1", "A2"}, {row["AliasName"] for row in aliases})
@@ -162,6 +177,14 @@ class OfflineNotebookRunTests(NotebookIntegrationBase):
         row = self.read(bridge[0]).collect()[0]
         self.assertEqual(("test:well:1", "resolved", "test:reference-data--FacilityType:Well"),
                          (row["source_id"], row["status"], row["target_id"]))
+
+    def test_relationship_bridges_use_the_parallel_write_batch(self):
+        self.assertTrue(
+            any(
+                any(target.startswith("it_relationship__") for target in batch)
+                for batch in self.namespace["_silver_write_batches"]
+            )
+        )
 
     def test_run_metadata_reports_success(self):
         statuses = {row["status"] for row in self.read("silver_run_status").collect()}
