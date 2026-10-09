@@ -209,7 +209,7 @@ With bridge upserts enabled, merge keys must be drawn from `id`, `version`, and 
 
 By default, `INCREMENTAL_WATERMARK_COLUMN = "ingestTime"` uses the ACZ bronze update timestamp to prune incremental upsert runs to affected concrete kinds before schema preflight and group processing. Active changed rows are transformed and upserted; rows explicitly marked `isActive = false` hard-delete matching Silver parent/wide and child rows by `MERGE_KEY_COLUMNS` so the default Silver outputs remain active-only. If `INCLUDE_INACTIVE_RECORDS = True`, inactive rows are included in the transformed Silver outputs instead of being hard-deleted. Use `INCREMENTAL_WATERMARK_MODE = "required"` when a scheduled job must fail rather than process all selected rows if the watermark column is missing.
 
-When watermark filtering is active, do not set `LIMIT` or `KIND_LIMITS`; the notebook rejects that combination because advancing a persistent watermark after a limited batch can skip unprocessed records. Watermark filtering intentionally includes rows at the previous maximum watermark value so late-arriving records with the same watermark are reprocessed safely through idempotent upserts and deletes.
+When watermark filtering is active, do not set `LIMIT` or `KIND_LIMITS`; the notebook rejects that combination because advancing a persistent watermark after a limited batch can skip unprocessed records. The filter includes rows equal to the previous maximum watermark value, so repeated runs may reprocess that boundary; merge-key upserts and deletes make this safe and allow late-arriving rows at that timestamp to be picked up.
 
 ## Run the pipeline
 
@@ -335,7 +335,7 @@ The offline and fake-ADME tests need nothing else. For the live tests, run `az l
 
 The `integration` extra constrains PySpark to `>=4.1,<4.2` and delta-spark to `>=4.2,<4.3`. Python 3.13 and Java 21 are the tested local/CI runtime; package extras do not install or pin Python or Java. Match the selected Fabric runtime when comparing performance, and use a compatible Spark/Delta release pair rather than independently upgrading either package.
 
-`tests/test_notebook_modes.py` exercises upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, output-shape helpers, and the SP, DC, MI and CLI authentication branches. These tests cover selected scenarios, not every input shape, cloud identity setup or Fabric runtime behavior.
+`tests/test_notebook_modes.py` covers selected notebook paths beyond the standard integration run: watermark-based upserts including equal-watermark rows, relationship-bridge replacement and inactive-source deletion, preserving existing bridges when bridge writes are disabled, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, output-shape helpers, and SP, DC, MI, and CLI authentication branches. These tests cover selected scenarios, not every input shape, cloud identity setup or Fabric runtime behavior.
 
 `tests/test_parallelism_experiment.py` checks deterministic generation, shared-implementation parity, safe settings, actual schema-preflight success, isolated concurrent metadata buffers, and result ordering. Its optional real Delta scenario runs the generated notebook with group parallelism 1 and 2 and compares output schemas and rows, excluding generated run/time values and prefix-dependent source-table names.
 

@@ -51,6 +51,10 @@ class NotebookSyncTests(unittest.TestCase):
         self.assertGreaterEqual(summary.markdown_cells, 1)
         self.assertIn("## Run pipeline", summary.headings)
 
+    def test_parser_does_not_advertise_unavailable_reference_generator(self) -> None:
+        with self.assertRaises(SystemExit):
+            notebook_sync.build_parser().parse_args(["--reference"])
+
     def test_shared_helper_sync_is_idempotent(self) -> None:
         nb = notebook_sync.load_notebook(NOTEBOOK)
         synchronized = notebook_sync.synchronize_shared_helpers(nb)
