@@ -96,7 +96,7 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
             row("test:well:5", "1", {"FacilityName": "Epsilon", "NameAliases": []}, ingest=LATER),
         ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
         run(cls.spark, cls.SETTINGS)
-        cls.third_keys = keys(cls.read("up_osdu_wks_well"))
+        cls.third_keys = keys(cls.spark.table("up_osdu_wks_well"))
 
     def test_first_run_publishes_every_active_record(self):
         self.assertEqual({("test:well:1", "1"), ("test:well:2", "1"), ("test:well:3", "1")}, self.first_keys)
