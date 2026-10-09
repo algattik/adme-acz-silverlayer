@@ -19,6 +19,7 @@ from test_notebook_integration import WELL_KIND, WELL_SCHEMA, NotebookIntegratio
 from tno_bronze import BRONZE_DDL
 
 WELLBORE_KIND = "osdu:wks:master-data--Wellbore:1.0.0"
+FACILITY_TYPE_KIND = "osdu:wks:reference-data--FacilityType:1.0.0"
 EARLIER = datetime(2026, 1, 1, tzinfo=timezone.utc)
 LATER = datetime(2026, 2, 1, tzinfo=timezone.utc)
 
@@ -77,14 +78,38 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
     def setUpClass(cls):
         super().setUpClass()
         write_bronze(cls.spark, [
-            row("test:well:1", "1", {"FacilityName": "Alpha", "NameAliases": [{"AliasName": "A1"}]}),
-            row("test:well:2", "1", {"FacilityName": "Beta", "NameAliases": [{"AliasName": "B1"}]}),
+            row("test:well:1", "1", {
+                "FacilityName": "Alpha",
+                "FacilityTypeID": "test:reference-data--FacilityType:facility-a:",
+                "NameAliases": [{"AliasName": "A1"}],
+            }),
+            row("test:well:2", "1", {
+                "FacilityName": "Beta",
+                "FacilityTypeID": "test:reference-data--FacilityType:facility-b:",
+                "NameAliases": [{"AliasName": "B1"}],
+            }),
             row("test:well:3", "1", {"FacilityName": "Gamma", "NameAliases": []}),
+            row("test:reference-data--FacilityType:facility-a", "1", {"Name": "Facility A"},
+                kind=FACILITY_TYPE_KIND),
+            row("test:reference-data--FacilityType:facility-b", "1", {"Name": "Facility B"},
+                kind=FACILITY_TYPE_KIND),
         ])
         run(cls.spark, cls.SETTINGS)
         cls.first_keys = keys(cls.spark.table("up_osdu_wks_well"))
+        cls.bridge_table = next(
+            table.name for table in cls.spark.catalog.listTables()
+            if table.name.startswith("up_relationship__")
+        )
+        cls.first_bridge_rows = {
+            (record["source_id"], record["source_version"]): (record["target_id"], record["status"])
+            for record in cls.spark.table(cls.bridge_table).collect()
+        }
         cls.spark.createDataFrame([
-            row("test:well:1", "2", {"FacilityName": "Alpha renamed", "NameAliases": [{"AliasName": "A2"}]}, ingest=LATER),
+            row("test:well:1", "2", {
+                "FacilityName": "Alpha renamed",
+                "FacilityTypeID": "test:reference-data--FacilityType:facility-b:",
+                "NameAliases": [{"AliasName": "A2"}],
+            }, ingest=LATER),
             row("test:well:4", "1", {"FacilityName": "Delta", "NameAliases": []}, ingest=LATER),
         ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
         cls.spark.sql(f"UPDATE osducatalog SET isActive = false, ingestTime = TIMESTAMP '{LATER:%Y-%m-%d %H:%M:%S}' "
@@ -109,6 +134,27 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
     def test_watermark_state_records_the_latest_ingest_time(self):
         state = self.read("silver_incremental_state").orderBy("updated_at").collect()
         self.assertEqual(["2026-01-01 00:00:00", "2026-02-01 00:00:00"], [r["watermark_value"] for r in state])
+
+    def test_watermark_upsert_refreshes_bridges_and_deletes_inactive_sources(self):
+        self.assertEqual(
+            {
+                ("test:well:1", "1"): ("test:reference-data--FacilityType:facility-a", "resolved"),
+                ("test:well:2", "1"): ("test:reference-data--FacilityType:facility-b", "resolved"),
+            },
+            self.first_bridge_rows,
+        )
+        bridge_rows = {
+            (record["source_id"], record["source_version"]): (record["target_id"], record["status"])
+            for record in self.read(self.bridge_table).collect()
+        }
+        self.assertEqual(
+            {
+                ("test:well:1", "1"): ("test:reference-data--FacilityType:facility-a", "resolved"),
+                ("test:well:1", "2"): ("test:reference-data--FacilityType:facility-b", "resolved"),
+            },
+            bridge_rows,
+        )
+        self.assertIn(self.bridge_table, self.namespace["results"][0].child_tables)
 
 
 class WideVersionedOutputTests(NotebookIntegrationBase):
