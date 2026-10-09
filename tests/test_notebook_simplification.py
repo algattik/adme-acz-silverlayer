@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -143,6 +144,60 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
 class NotebookSimplificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.nb = load_notebook()
+
+    @unittest.skipUnless(importlib.util.find_spec("pandas"), "Install pandas for results display tests.")
+    def test_results_summary_separates_and_deduplicates_bridges(self) -> None:
+        source = "".join(self.nb["cells"][-1]["source"])
+        bridge = "fixture_relationship__well__facility__facilitytype"
+        for wide in (False, True):
+            with self.subTest(wide=wide):
+                displayed = []
+                results = [
+                    SimpleNamespace(
+                        kind=f"osdu:wks:master-data--Well:{version}",
+                        status="success", records_processed=2, parent_table="fixture_well",
+                        child_tables=[bridge, bridge] if wide else ["fixture_well___aliases", bridge, bridge],
+                        reassembled=wide, validation_passed=True, error=None,
+                    )
+                    for version in ("1.0.0", "2.0.0")
+                ]
+                namespace = {
+                    "results": results, "table_prefix": "fixture_",
+                    "display": displayed.append, "print": lambda *args: None,
+                }
+                exec(compile(source, "<results-summary>", "exec"), namespace)
+                self.assertEqual(len(displayed), 2)
+                self.assertEqual(displayed[0]["Children"].tolist(), ["wide", "wide"] if wide else [1, 1])
+                self.assertEqual(displayed[0]["Bridges"].tolist(), [1, 1])
+                self.assertEqual(displayed[1].to_dict("records"), [{
+                    "Bridge table": bridge,
+                    "Source kinds": ", ".join(r.kind for r in results),
+                    "Parent tables": "fixture_well",
+                    "Source statuses": "success",
+                }])
+
+    @unittest.skipUnless(importlib.util.find_spec("pandas"), "Install pandas for results display tests.")
+    def test_results_summary_without_bridges_and_without_execution(self) -> None:
+        source = "".join(self.nb["cells"][-1]["source"])
+        result = SimpleNamespace(
+            kind="osdu:wks:master-data--Well:1.0.0",
+            status="skipped", records_processed=0, parent_table="well",
+            child_tables=None, reassembled=False, validation_passed=True, error=None,
+        )
+        for results, dry_run in (([result], []), ([], [{"kind": result.kind}]), ([], [])):
+            with self.subTest(results=bool(results), dry_run=bool(dry_run)):
+                displayed = []
+                namespace = {
+                    "results": results, "table_prefix": "", "dry_run_results": dry_run,
+                    "display": displayed.append, "print": lambda *args: None,
+                }
+                exec(compile(source, "<results-summary>", "exec"), namespace)
+                self.assertEqual(len(displayed), 1 if results or dry_run else 0)
+                self.assertEqual(namespace["bridge_inventory"], {})
+                if results:
+                    self.assertEqual(displayed[0]["Bridges"].tolist(), [0])
+                elif dry_run:
+                    self.assertEqual(displayed[0].to_dict("records"), dry_run)
 
     def test_notebook_structure_is_valid(self) -> None:
         self.assertEqual(self.nb["nbformat"], 4)

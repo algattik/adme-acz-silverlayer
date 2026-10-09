@@ -199,6 +199,14 @@ class OfflineNotebookRunTests(NotebookIntegrationBase):
 
     def test_results_summary_is_displayed(self):
         self.assertTrue(self.displayed)
+        self.assertEqual(self.namespace["df_results"]["Children"].tolist(), [1])
+        self.assertEqual(self.namespace["df_results"]["Bridges"].tolist(), [1])
+        bridge_rows = self.namespace["df_bridges"].to_dict("records")
+        self.assertEqual(len(bridge_rows), 1)
+        self.assertEqual(bridge_rows[0]["Source kinds"], WELL_KIND)
+        self.assertEqual(bridge_rows[0]["Parent tables"], "it_osdu_wks_well")
+        self.assertEqual(bridge_rows[0]["Source statuses"], "success")
+        self.assertTrue(self.spark.catalog.tableExists(bridge_rows[0]["Bridge table"]))
 
 
 LIVE_BRONZE = os.environ.get("ADME_ACZ_LIVE_BRONZE_PATH")
