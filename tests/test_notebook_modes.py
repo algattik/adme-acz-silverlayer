@@ -154,6 +154,28 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
         )
 
 
+    def test_watermark_upsert_refreshes_bridges_and_deletes_inactive_sources(self):
+        self.assertEqual(
+            {
+                ("test:well:1", "1"): ("test:reference-data--FacilityType:facility-a", "resolved"),
+                ("test:well:2", "1"): ("test:reference-data--FacilityType:facility-b", "resolved"),
+            },
+            self.first_bridge_rows,
+        )
+        bridge_rows = {
+            (record["source_id"], record["source_version"]): (record["target_id"], record["status"])
+            for record in self.read(self.bridge_table).collect()
+        }
+        self.assertEqual(
+            {
+                ("test:well:1", "1"): ("test:reference-data--FacilityType:facility-a", "resolved"),
+                ("test:well:1", "2"): ("test:reference-data--FacilityType:facility-b", "resolved"),
+            },
+            bridge_rows,
+        )
+        self.assertIn(self.bridge_table, self.namespace["results"][0].child_tables)
+
+
 class WatermarkedRelationshipBridgeTests(NotebookIntegrationBase):
     KIND = "osdu:wks:master-data--Wellbore:1.0.0"
     TARGET_KIND = "osdu:wks:reference-data--FacilityType:1.0.0"
@@ -177,19 +199,21 @@ class WatermarkedRelationshipBridgeTests(NotebookIntegrationBase):
             name for name in (table.name for table in cls.spark.catalog.listTables())
             if name.startswith("wmbridge_relationship__") and name.endswith("facilitytype")
         )
-        cls.spark.createDataFrame([
-            row("test:wellbore:1", "1", {"FacilityTypeID": cls.OTHER_TARGET_ID + ":"},
-                kind=cls.KIND, ingest=LATER),
-        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
-        run(cls.spark, cls.SETTINGS)
+        payload = row("test:wellbore:1", "1", {"FacilityTypeID": cls.OTHER_TARGET_ID + ":"}, kind=cls.KIND)[0]
+        cls.spark.sql(
+            f"UPDATE osducatalog SET data = '{payload}', ingestTime = TIMESTAMP '{LATER:%Y-%m-%d %H:%M:%S}' "
+            "WHERE id = 'test:wellbore:1' AND version = '1'"
+        )
+        cls.update_results = run(cls.spark, cls.SETTINGS)["results"]
         cls.bridge_after_source_update = cls.spark.table(cls.bridge_table).collect()
-        cls.spark.createDataFrame([
-            row("test:wellbore:1", "1", {"FacilityTypeID": cls.OTHER_TARGET_ID + ":"},
-                kind=cls.KIND, active=False, ingest=LATEST),
-        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
-        run(cls.spark, cls.SETTINGS)
+        cls.spark.sql(
+            f"UPDATE osducatalog SET isActive = false, ingestTime = TIMESTAMP '{LATEST:%Y-%m-%d %H:%M:%S}' "
+            "WHERE id = 'test:wellbore:1' AND version = '1'"
+        )
+        cls.delete_results = run(cls.spark, cls.SETTINGS)["results"]
 
     def test_watermarked_source_change_replaces_its_bridge_row(self):
+        self.assertEqual(["success"], [result.status for result in self.update_results])
         rows = self.bridge_after_source_update
         self.assertEqual(1, len(rows))
         self.assertEqual(
@@ -199,6 +223,7 @@ class WatermarkedRelationshipBridgeTests(NotebookIntegrationBase):
         self.assertEqual("test:wellbore:1", rows[0]["source_id"])
 
     def test_watermarked_inactive_source_deletes_its_bridge_row(self):
+        self.assertEqual(["success"], [result.status for result in self.delete_results])
         self.assertEqual(0, self.read(self.bridge_table).count())
 
 
@@ -288,27 +313,6 @@ class WatermarkedBridgeVersionRetentionTests(NotebookIntegrationBase):
         )
         self.assertTrue(all(row.status == "resolved" for row in rows))
         self.assertTrue(all(row.target_version == "1" for row in rows))
-
-    def test_watermark_upsert_refreshes_bridges_and_deletes_inactive_sources(self):
-        self.assertEqual(
-            {
-                ("test:well:1", "1"): ("test:reference-data--FacilityType:facility-a", "resolved"),
-                ("test:well:2", "1"): ("test:reference-data--FacilityType:facility-b", "resolved"),
-            },
-            self.first_bridge_rows,
-        )
-        bridge_rows = {
-            (record["source_id"], record["source_version"]): (record["target_id"], record["status"])
-            for record in self.read(self.bridge_table).collect()
-        }
-        self.assertEqual(
-            {
-                ("test:well:1", "1"): ("test:reference-data--FacilityType:facility-a", "resolved"),
-                ("test:well:1", "2"): ("test:reference-data--FacilityType:facility-b", "resolved"),
-            },
-            bridge_rows,
-        )
-        self.assertIn(self.bridge_table, self.namespace["results"][0].child_tables)
 
 
 class WideVersionedOutputTests(NotebookIntegrationBase):
@@ -448,11 +452,12 @@ class RelationshipPublicationSafetyTests(NotebookIntegrationBase):
             ["success"],
         )
         self.assertEqual(self.read("silver_incremental_state").count(), state_count + 1)
-        self.spark.createDataFrame([
-            row(source_id, "2", {"FacilityName": "Source", "FacilityTypeID": target_id + ":"},
-                ingest=datetime(2026, 3, 1, tzinfo=timezone.utc)),
-        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
-        namespace["run_silver_build"](self.spark, **build_arguments, merge_key_columns=["id"])
+        self.spark.sql(
+            "UPDATE osducatalog SET version = '2', ingestTime = TIMESTAMP '2026-03-01 00:00:00' "
+            f"WHERE id = '{source_id}'"
+        )
+        replacement_results = namespace["run_silver_build"](self.spark, **build_arguments, merge_key_columns=["id"])
+        self.assertEqual(["success"], [result.status for result in replacement_results])
         self.assertEqual({record.source_version for record in self.read(bridge).collect()}, {"2"})
         retained = self.read(bridge).collect()
         self.spark.sql(
@@ -519,6 +524,22 @@ class DryRunTests(NotebookIntegrationBase):
     def test_dry_run_creates_no_output_tables(self):
         names = {t.name for t in self.spark.catalog.listTables()}
         self.assertFalse([n for n in names if n.startswith("dry_")], names)
+
+
+class UnresolvedSchemaFieldTests(DryRunTests):
+    def test_columns_absent_from_the_schema_are_reported_as_quality_issues(self):
+        registry = self.namespace["SchemaRegistry"].from_dict({WELL_KIND: WELL_SCHEMA})
+        frame = self.spark.createDataFrame([("w1", "Alpha", "x")], "id string, FacilityName string, Surprise string")
+        issues = self.namespace["_unresolved_schema_field_frames"](
+            self.spark, "run", WELL_KIND, frame, registry,
+        )
+        self.assertEqual(
+            ["Surprise"], [issue.collect()[0]["column_name"] for issue in issues],
+        )
+        self.assertEqual([], self.namespace["_unresolved_schema_field_frames"](
+            self.spark, "run", "unknown:kind:1.0.0", frame, registry,
+        ))
+        self.assertFalse(registry.has_field("unknown:kind:1.0.0", "id"))
 
 
 class AuthenticationAndContextTests(NotebookIntegrationBase):
