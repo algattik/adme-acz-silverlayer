@@ -301,7 +301,7 @@ The offline and fake-ADME tests need nothing else. For the live tests, run `az l
 
 The `integration` extra pins the Fabric notebook runtime versions (Python 3.13, PySpark 4.1, delta-spark 4.2, Java 21); update the pins when Fabric upgrades its Spark runtime. Keep PySpark and delta-spark on matching major versions; mixed versions fail Delta overwrites with "does not support truncate in batch mode".
 
-`tests/test_notebook_modes.py` runs the notebook for the paths the default runs do not reach: upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, the output-shape helpers, and the SP, DC, MI and CLI authentication branches. Every notebook function that the pipeline can reach runs in at least one test layer; the remaining uncalled functions (`process_kind`, `write_run_info`, `write_run_manifest`, `collect_schema_fields` and the helpers only they use) are not reachable from the pipeline.
+`tests/test_notebook_modes.py` runs the notebook for the paths the default runs do not reach: upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, the output-shape helpers, and the SP, DC, MI and CLI authentication branches. Every notebook function that the pipeline can reach runs in at least one test layer.
 
 ### Optional local Spark tests
 

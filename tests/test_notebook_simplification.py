@@ -185,10 +185,14 @@ class NotebookSimplificationTests(unittest.TestCase):
             if cell["cell_type"] != "code":
                 continue
             metadata = cell.get("metadata", {})
-            if section in utility_sections:
+            runtime_resolution = "FABRIC RUNTIME RESOLUTION" in "".join(cell.get("source", []))
+            if section in utility_sections or runtime_resolution:
                 self.assertTrue(metadata.get("collapsed"))
                 self.assertTrue(metadata.get("jupyter", {}).get("source_hidden"))
-                hidden_cells.append(section)
+                if runtime_resolution:
+                    self.assertFalse(metadata.get("jupyter", {}).get("outputs_hidden"))
+                else:
+                    hidden_cells.append(section)
             else:
                 self.assertFalse(metadata.get("jupyter", {}).get("source_hidden"))
 
@@ -391,7 +395,6 @@ class NotebookSimplificationTests(unittest.TestCase):
 
         self.assertIn("def relationship_bridge_table_name(", source)
         self.assertIn('alias("_relationship_bridge_table")', source)
-        self.assertIn("relationship_bridge_frames_for_tables(", source)
         self.assertIn("def resolve_direct_relationships(", source)
         self.assertIn("relationship_frames=relationship_frames", source)
         self.assertIn("relationship_changed_key_frames=relationship_changed_key_frames", source)
@@ -530,14 +533,12 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def _write_schema_docs_to_persistent_cache(",
             "validate_adme_schema_service_access()",
             'timings["schema_access_check"]',
-            "def write_run_manifest(",
             "def write_run_status(",
             "def _output_tables_from_results(",
             "def collect_data_quality_issues(",
             "def evaluate_and_write_data_quality_issues(",
             "def write_data_quality_issues(",
             "def flush_data_quality_issue_rows(",
-            "def write_output_documentation(",
             "def output_documentation_rows(",
             "def _buffer_or_write_output_documentation(",
             "def validate_table_names(",
@@ -562,8 +563,6 @@ class NotebookSimplificationTests(unittest.TestCase):
             'T.StructField("version_strategy", T.StringType(), True)',
             'T.StructField("schema_versions", T.ArrayType(T.StringType()), True)',
             'T.StructField("schema_mode", T.StringType(), True)',
-            "_load_schema_doc_from_persistent_cache",
-            "_write_schema_doc_to_persistent_cache",
             "silver_output_documentation",
             "silver_data_quality_issues",
             "Timing summary",

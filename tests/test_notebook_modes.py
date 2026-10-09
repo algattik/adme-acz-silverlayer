@@ -107,10 +107,8 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
         self.assertIn("A2", aliases)
 
     def test_watermark_state_records_the_latest_ingest_time(self):
-        state = self.read("silver_incremental_state").collect()
-        self.assertTrue(state)
-        self.assertIn(LATER.replace(tzinfo=None).isoformat(" "), str(state[0]) .replace("T", " ").replace(", ", " ")
-                      .replace("datetime.datetime(", "") or str(state))
+        state = self.read("silver_incremental_state").orderBy("updated_at").collect()
+        self.assertEqual(["2026-01-01 00:00:00", "2026-02-01 00:00:00"], [r["watermark_value"] for r in state])
 
 
 class WideVersionedOutputTests(NotebookIntegrationBase):
