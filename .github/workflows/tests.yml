@@ -23,9 +23,11 @@ jobs:
       matrix:
         include:
           - name: Unit tests
-            files: "$(ls test_*.py | grep -v '^test_notebook_.*integration' | sed 's/\\.py$//')"
+            files: "$(ls test_*.py | grep -v '^test_notebook_\(.*integration\|modes\)' | sed 's/\\.py$//')"
           - name: Notebook run with synthetic data
             files: test_notebook_integration
+          - name: Notebook run modes (upsert, wide, inference, auth)
+            files: test_notebook_modes
           - name: Notebook run with TNO data and fake ADME
             files: test_notebook_tno_integration
             tno_cache: true
