@@ -193,7 +193,7 @@ Do not confuse the bronze record `version` column with `schema_version`, which i
 
 By default, `INCREMENTAL_WATERMARK_COLUMN = "ingestTime"` uses the ACZ bronze update timestamp to prune incremental upsert runs to affected concrete kinds before schema preflight and group processing. Active changed rows are transformed and upserted; rows explicitly marked `isActive = false` hard-delete matching Silver parent/wide and child rows by `MERGE_KEY_COLUMNS` so the default Silver outputs remain active-only. If `INCLUDE_INACTIVE_RECORDS = True`, inactive rows are included in the transformed Silver outputs instead of being hard-deleted. Use `INCREMENTAL_WATERMARK_MODE = "required"` when a scheduled job must fail rather than process all selected rows if the watermark column is missing.
 
-When watermark filtering is active, do not set `LIMIT` or `KIND_LIMITS`; the notebook rejects that combination because advancing a persistent watermark after a limited batch can skip unprocessed records. Watermark filtering intentionally includes rows at the previous maximum watermark value so late-arriving records with the same watermark are reprocessed safely through idempotent upserts and deletes.
+When watermark filtering is active, do not set `LIMIT` or `KIND_LIMITS`; the notebook rejects that combination because advancing a persistent watermark after a limited batch can skip unprocessed records. The filter includes rows equal to the previous maximum watermark value, so repeated runs may reprocess that boundary; merge-key upserts and deletes make this safe and allow late-arriving rows at that timestamp to be picked up.
 
 ## Run the pipeline
 
@@ -214,9 +214,9 @@ The notebook is organized into these executable sections:
 
 ## Development layout
 
-### Schema-driven full-rebuild reference
+### Schema-driven full-rebuild reference implementation
 
-`ADME ACZ Silver Reference.ipynb` is a separate, self-contained reference path that reads `osducatalog` directly. It does not consume or change the compatibility notebook's output. Configure the source/destination lakehouse paths and upload exact exported schema files to `Files/adme-schemas`; filenames replace kind colons with underscores. Publication defaults to `False`.
+The package also contains a local schema-driven full-rebuild implementation in `schema_contract.py`, `silver.py`, and `silver_publish.py`. It is separate from the customer-facing compatibility notebook and is exercised by the corresponding unit, Spark, and optional Delta tests. There is no generated reference notebook in this repository.
 
 | Contract | Reference behavior |
 | --- | --- |
@@ -234,15 +234,7 @@ The source requires string `id`/`kind`, JSON-string `data`, Boolean `isActive`, 
 
 Outputs use the existing kind/child naming helpers and have a default `gen_silver_` prefix. Publication appends `__run_<run_id>` to each physical table folder. The relationship bridge stores logical table keys; the run manifest maps those keys to physical paths. Consumers must select all outputs and `versionAsOf` values from **one** `Files/silver-reference/<run_id>/succeeded.json`, not from mixed table-name tips. Failed runs retain their partial inventory and propagate the error. Multi-table publication is manifest-gated, not a Delta transaction; there is no automatic rollback. Keep the previous successful manifest for recovery, rebuild with a new ID, and retain pinned Delta versions/files while consumers need them. SQL endpoint discovery is asynchronous and is not part of the publish guarantee.
 
-The reference notebook is generated from `schema_contract.py`, `silver.py`, `silver_publish.py` and the shared naming/alias helpers. Its short control cells explain setup, snapshot pinning, candidate validation, publication and recovery; implementation cells are collapsed but inspectable. Regenerate it after source changes:
-
-```shell
-python scripts/sync_notebook.py --reference
-python scripts/sync_notebook.py --reference --check --summary
-python -m unittest discover -s tests -q
-```
-
-`test_schema_contract.py` covers pure projection/reference rules, `test_silver.py` runs real synthetic Spark transformations and injects publication failures, and `test_reference_notebook.py` verifies source parity, deterministic generation, syntax and hygiene. Optional `test_delta_silver.py` runs the generated implementation against real local Delta, including pinned input after a later commit and immutable output publication:
+`test_schema_contract.py` covers pure projection/reference rules, `test_silver.py` runs synthetic Spark transformations and injects publication failures, and optional `test_delta_silver.py` runs the implementation against real local Delta, including pinned input after a later commit and immutable output publication:
 
 ```shell
 python -m pip install -e ".[delta]"
@@ -301,7 +293,7 @@ The offline and fake-ADME tests need nothing else. For the live tests, run `az l
 
 The `integration` extra pins the Fabric notebook runtime versions (Python 3.13, PySpark 4.1, delta-spark 4.2, Java 21); update the pins when Fabric upgrades its Spark runtime. Keep PySpark and delta-spark on matching major versions; mixed versions fail Delta overwrites with "does not support truncate in batch mode".
 
-`tests/test_notebook_modes.py` runs the notebook for the paths the default runs do not reach: upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, the output-shape helpers, and the SP, DC, MI and CLI authentication branches. Every notebook function that the pipeline can reach runs in at least one test layer.
+`tests/test_notebook_modes.py` covers selected notebook paths beyond the standard integration run: upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, output-shape helpers, and SP, DC, MI, and CLI authentication branches. The tests are broad but do not guarantee every possible setting combination or every reachable function has integration coverage.
 
 ### Optional local Spark tests
 

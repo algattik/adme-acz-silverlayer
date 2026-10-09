@@ -91,6 +91,12 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
         cls.spark.sql(f"UPDATE osducatalog SET isActive = false, ingestTime = TIMESTAMP '{LATER:%Y-%m-%d %H:%M:%S}' "
                       "WHERE id = 'test:well:2'")
         cls.namespace = run(cls.spark, cls.SETTINGS)
+        cls.second_keys = keys(cls.read("up_osdu_wks_well"))
+        cls.spark.createDataFrame([
+            row("test:well:5", "1", {"FacilityName": "Epsilon", "NameAliases": []}, ingest=LATER),
+        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+        run(cls.spark, cls.SETTINGS)
+        cls.third_keys = keys(cls.read("up_osdu_wks_well"))
 
     def test_first_run_publishes_every_active_record(self):
         self.assertEqual({("test:well:1", "1"), ("test:well:2", "1"), ("test:well:3", "1")}, self.first_keys)
@@ -98,7 +104,10 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
     def test_second_run_merges_new_versions_and_records(self):
         self.assertEqual(
             {("test:well:1", "1"), ("test:well:1", "2"), ("test:well:3", "1"), ("test:well:4", "1")},
-            keys(self.read("up_osdu_wks_well")))
+            self.second_keys)
+
+    def test_rows_at_the_watermark_boundary_are_reprocessed(self):
+        self.assertIn(("test:well:5", "1"), self.third_keys)
 
     def test_deactivated_record_is_deleted_from_parent_and_child_tables(self):
         self.assertNotIn("test:well:2", {r["id"] for r in self.read("up_osdu_wks_well").collect()})
@@ -109,7 +118,10 @@ class UpsertWatermarkTests(NotebookIntegrationBase):
 
     def test_watermark_state_records_the_latest_ingest_time(self):
         state = self.read("silver_incremental_state").orderBy("updated_at").collect()
-        self.assertEqual(["2026-01-01 00:00:00", "2026-02-01 00:00:00"], [r["watermark_value"] for r in state])
+        self.assertEqual(
+            ["2026-01-01 00:00:00", "2026-02-01 00:00:00", "2026-02-01 00:00:00"],
+            [r["watermark_value"] for r in state],
+        )
 
 
 class WatermarkedRelationshipBridgeTests(NotebookIntegrationBase):
