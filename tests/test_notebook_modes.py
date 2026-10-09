@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError as error:
+    if error.name != "requests":
+        raise
+    requests = None
 
 from notebook_runner import run_notebook
 from test_notebook_integration import WELL_KIND, WELL_SCHEMA, NotebookIntegrationBase
@@ -141,6 +146,144 @@ class WideVersionedOutputTests(NotebookIntegrationBase):
         issues = self.read("silver_data_quality_issues").filter("check_name = 'duplicate_merge_key'").collect()
         self.assertEqual(["test:well:2"], [r["source_id"] for r in issues])
         self.assertIn("appears 2 times", issues[0]["issue_detail"])
+
+
+class BridgeWatermarkLifecycleTests(NotebookIntegrationBase):
+    TARGET_KIND = "osdu:wks:reference-data--FacilityType:1.0.0"
+    TARGET_PREFIX = "test:reference-data--FacilityType:"
+
+    def source(self, record_id, version, target, **kwargs):
+        payload = {"FacilityName": record_id, "FacilityTypeID": f"{self.TARGET_PREFIX}{target}:"}
+        return row(record_id, version, payload, **kwargs)
+
+    def target(self, name, **kwargs):
+        return row(f"{self.TARGET_PREFIX}{name}", "1", {"Name": name}, kind=self.TARGET_KIND, **kwargs)
+
+    def build(self, **overrides):
+        settings = {
+            "RUN_PROFILE": "execute", "KINDS": [WELL_KIND], "TABLE_PREFIX": "life_",
+            "WRITE_MODE": "upsert", "VERSION_STRATEGY": "merge", "INCREMENTAL_WATERMARK_MODE": "auto",
+        }
+        settings.update(overrides)
+        return run(self.spark, settings)
+
+    def append(self, rows):
+        self.spark.createDataFrame(rows, BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+
+    def edges(self, bridge):
+        prefix_length = len(self.TARGET_PREFIX)
+        return sorted(
+            (r["source_id"], r["source_version"], r["target_id"][prefix_length:], r["status"])
+            for r in self.read(bridge).collect()
+        )
+
+    def test_bridge_rows_follow_changed_sources_across_watermarked_runs(self):
+        write_bronze(self.spark, [
+            self.source("s1", "1", "a"), self.source("s2", "1", "b"),
+            self.target("a"), self.target("b"), self.target("c"),
+        ])
+        namespace = self.build()
+        bridge = next(n for n in namespace["results"][0].child_tables if "relationship__" in n)
+        self.assertEqual([("s1", "1", "a", "resolved"), ("s2", "1", "b", "resolved")], self.edges(bridge))
+
+        self.build()
+        self.assertEqual([("s1", "1", "a", "resolved"), ("s2", "1", "b", "resolved")], self.edges(bridge))
+
+        self.append([self.source("s1", "2", "c", ingest=LATER)])
+        self.build()
+        self.assertEqual(
+            [("s1", "1", "a", "resolved"), ("s1", "2", "c", "resolved"), ("s2", "1", "b", "resolved")],
+            self.edges(bridge),
+        )
+
+        self.append([self.source("s2", "1", "c", ingest=datetime(2026, 3, 1, tzinfo=timezone.utc))])
+        self.build()
+        self.assertEqual(
+            [("s1", "1", "a", "resolved"), ("s1", "2", "c", "resolved"), ("s2", "1", "c", "resolved")],
+            self.edges(bridge),
+        )
+
+        self.spark.sql(
+            "UPDATE osducatalog SET isActive = false, ingestTime = TIMESTAMP '2026-05-01 00:00:00' "
+            "WHERE id = 's1' AND version = '1'"
+        )
+        self.build()
+        self.assertEqual([("s1", "2", "c", "resolved"), ("s2", "1", "c", "resolved")], self.edges(bridge))
+
+
+class RelationshipPublicationSafetyTests(NotebookIntegrationBase):
+    def test_failed_bridge_write_is_retryable_and_disabled_bridges_are_retained(self):
+        target_id = "test:reference-data--FacilityType:Well"
+        target_kind = "osdu:wks:reference-data--FacilityType:1.0.0"
+        source_id = "test:well:bridge-source"
+        settings = {
+            "RUN_PROFILE": "execute", "KINDS": [WELL_KIND], "TABLE_PREFIX": "safe_",
+            "WRITE_MODE": "upsert", "VERSION_STRATEGY": "merge",
+            "INCREMENTAL_WATERMARK_MODE": "auto",
+        }
+        write_bronze(self.spark, [
+            row(source_id, "1", {"FacilityName": "Source", "FacilityTypeID": target_id + ":"}),
+            row(target_id, "1", {"Name": "Well"}, kind=target_kind),
+        ])
+        namespace = run(self.spark, settings)
+        bridge = next(name for name in namespace["results"][0].child_tables if "relationship__" in name)
+        state_count = self.read("silver_incremental_state").count()
+        self.spark.sql(
+            f"UPDATE osducatalog SET ingestTime = TIMESTAMP '{LATER:%Y-%m-%d %H:%M:%S}' "
+            f"WHERE id = '{source_id}'"
+        )
+        build_arguments = {
+            "kinds": [WELL_KIND], "workspace_id": "fixture-workspace", "lakehouse_id": "fixture-lakehouse",
+            "bronze_table": "osducatalog", "incremental": True, "table_prefix": "safe_",
+            "allow_overwrite": True, "version_strategy": "merge",
+        }
+        child_write = namespace["_incremental_child_write"]
+
+        def fail_bridge(spark, frame, target, *args):
+            if target == bridge:
+                raise OSError("Injected bridge publication failure")
+            return child_write(spark, frame, target, *args)
+
+        with mock.patch.dict(namespace, {"_incremental_child_write": fail_bridge}):
+            with self.assertRaisesRegex(OSError, "Injected bridge"):
+                namespace["run_silver_build"](self.spark, **build_arguments)
+        self.assertEqual(self.read("silver_incremental_state").count(), state_count)
+        self.assertEqual(
+            [result.status for result in namespace["run_silver_build"](self.spark, **build_arguments)],
+            ["success"],
+        )
+        self.assertEqual(self.read("silver_incremental_state").count(), state_count + 1)
+        self.spark.createDataFrame([
+            row(source_id, "2", {"FacilityName": "Source", "FacilityTypeID": target_id + ":"},
+                ingest=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+        ], BRONZE_DDL).write.format("delta").mode("append").saveAsTable("osducatalog")
+        namespace["run_silver_build"](self.spark, **build_arguments, merge_key_columns=["id"])
+        self.assertEqual({record.source_version for record in self.read(bridge).collect()}, {"2"})
+        retained = self.read(bridge).collect()
+        self.spark.sql(
+            "UPDATE osducatalog SET isActive = false, ingestTime = TIMESTAMP '2026-04-01 00:00:00' "
+            f"WHERE id = '{source_id}'"
+        )
+        namespace["run_silver_build"](self.spark, **build_arguments, write_relationship_bridges=False)
+        self.assertEqual(self.read("safe_osdu_wks_well").count(), 0)
+        self.assertEqual(self.read(bridge).collect(), retained)
+
+    def test_payload_merge_keys_fail_before_bronze_access(self):
+        from test_notebook_simplification import extract_functions, load_notebook
+
+        build = extract_functions(load_notebook(), ["run_silver_build"])["run_silver_build"]
+        read = mock.Mock(side_effect=AssertionError("No source access before validation"))
+        build.__globals__.update(
+            perf_counter=lambda: 0,
+            uuid=SimpleNamespace(uuid4=lambda: "fixture-run"),
+            datetime=datetime, UTC=timezone.utc,
+            _effective_merge_key_columns=lambda value: value,
+            read_bronze_table_spark=read,
+        )
+        with self.assertRaisesRegex(ValueError, "identity merge keys"):
+            build(self.spark, [WELL_KIND], "workspace", "lakehouse", bronze_table="osducatalog",
+                  incremental=True, merge_key_columns=["custom_key"])
+        read.assert_not_called()
 
 
 class SchemaInferenceTests(NotebookIntegrationBase):

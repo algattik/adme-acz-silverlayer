@@ -17,6 +17,12 @@ from adme_acz_silverlayer import notebook_sync  # noqa: E402
 
 
 class NotebookSyncTests(unittest.TestCase):
+    def test_removed_reference_generator_is_not_advertised(self) -> None:
+        import adme_acz_silverlayer
+
+        self.assertNotIn("reference_notebook", adme_acz_silverlayer.__all__)
+        self.assertNotIn("--reference", notebook_sync.build_parser().format_help())
+
     def test_committed_notebook_is_clean_and_self_contained(self) -> None:
         nb = notebook_sync.load_notebook(NOTEBOOK)
 

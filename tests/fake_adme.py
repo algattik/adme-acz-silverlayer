@@ -8,8 +8,6 @@ schema service returns them: one document per kind with the referenced abstract 
 import copy
 import datetime
 import json
-import random
-import socket
 import ssl
 import tempfile
 import threading
@@ -26,27 +24,6 @@ ENTITY_FILES = {
     "osdu:wks:master-data--Well:1.0.0": "master-data/Well.1.0.0.json",
     "osdu:wks:master-data--Wellbore:1.0.0": "master-data/Wellbore.1.0.0.json",
 }
-
-
-PORT_RANGE = range(20000, 30000)
-
-
-def free_port(count: int = 1) -> int:
-    """Pick a free local port below 30000, leaving `count` consecutive ports available."""
-    for port in random.sample(PORT_RANGE[:-count], 500):
-        sockets = []
-        try:
-            for offset in range(count):
-                probe = socket.socket()
-                sockets.append(probe)
-                probe.bind(("127.0.0.1", port + offset))
-            return port
-        except OSError:
-            continue
-        finally:
-            for probe in sockets:
-                probe.close()
-    raise RuntimeError("No free local port below 30000.")
 
 
 def _download(relative: str, cache: Path | None) -> dict:
@@ -130,7 +107,7 @@ class FakeAdme:
         self.certificate_path, key_path = _self_signed_certificate(Path(self._directory.name))
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(self.certificate_path, key_path)
-        self._server = ThreadingHTTPServer(("127.0.0.1", free_port()), self._handler())
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 

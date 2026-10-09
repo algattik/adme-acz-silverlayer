@@ -260,11 +260,6 @@ def _format_summary(summary: NotebookSummary) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Embed shared helpers and normalize the ADME ACZ Silver Layer notebook.")
     parser.add_argument(
-        "--reference",
-        action="store_true",
-        help="Generate/check the schema-driven Silver reference notebook instead of the compatibility notebook.",
-    )
-    parser.add_argument(
         "notebook",
         nargs="?",
         default=NOTEBOOK_NAME,
@@ -288,14 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     notebook_path = Path(args.notebook)
 
     try:
-        if args.reference:
-            from .reference_notebook import REFERENCE_NOTEBOOK, synchronize_reference_notebook
-
-            if notebook_path.name == NOTEBOOK_NAME:
-                notebook_path = notebook_path.with_name(REFERENCE_NOTEBOOK)
-            changed = synchronize_reference_notebook(notebook_path, check=args.check)
-        else:
-            changed = sync_notebook(notebook_path, check=args.check)
+        changed = sync_notebook(notebook_path, check=args.check)
         if args.summary:
             print(_format_summary(summarize_notebook(notebook_path)))
         if args.check and changed:

@@ -158,6 +158,33 @@ class SchemaContractTests(unittest.TestCase):
             _, references = project_record({"data": json.dumps({"Link": value})}, plan)
             self.assertEqual(references[0][-1], status)
 
+    def test_node_annotations_cannot_override_inherited_relationship_constraints(self):
+        schema = schema_with({"Link": {
+            "allOf": [{"type": "string", "x-osdu-relationship": TARGETS,
+                       "pattern": r"^test:master-data--Asset:a:[0-9]*$"}],
+            "x-osdu-relationship": [],
+            "pattern": r"^test:.*:[0-9]*$",
+        }})
+        plan = compile_schema(schema, KIND)
+        for value in ("test:master-data--Other:a:", "test:master-data--Asset:b:"):
+            with self.subTest(value=value):
+                _, references = project_record({"data": json.dumps({"Link": value})}, plan)
+                self.assertEqual(references[0][-1], "invalid_reference")
+        schema["properties"]["data"]["properties"]["Link"]["x-osdu-relationship"] = [
+            {"GroupType": "master-data", "EntityType": "Other"}
+        ]
+        with self.assertRaisesRegex(ValueError, "Contradictory inherited"):
+            compile_schema(schema, KIND)
+
+    def test_array_annotation_intersects_item_relationship_constraints(self):
+        schema = schema_with({"Links": {
+            "type": "array", "x-osdu-relationship": [],
+            "items": {"type": "string", "x-osdu-relationship": TARGETS},
+        }})
+        plan = compile_schema(schema, KIND)
+        _, references = project_record({"data": '{"Links":["test:master-data--Other:a:"]}'}, plan)
+        self.assertEqual(references[0][-1], "invalid_reference")
+
     def test_escaped_property_paths_are_unambiguous(self):
         plan = compile_schema(schema_with({
             "a.b/c~": {"type": "string", "x-osdu-relationship": TARGETS}

@@ -61,7 +61,7 @@ Before running the notebook, confirm that the customer environment has:
 6. Set `RUN_PROFILE = "execute"` when the dry run looks correct. `RUN_PROFILE` controls whether the pipeline runs; `WRITE_MODE` independently controls whether it uses `upsert` or `full_refresh`. Set `ALLOW_OVERWRITE = True` only when replacing existing output tables is intended.
 7. Review the generated Silver tables, including relationship-specific bridge tables, and the run records in `silver_run_info`, `silver_run_manifest`, and `silver_run_status`.
 
-For a bounded table-group concurrency trial across Well, Wellbore, WellLog, WellboreMarkerSet, WellboreTrajectory, and CoordinateReferenceSystem kinds, import [ADME ACZ Silver Parallelism Experiment.ipynb](ADME%20ACZ%20Silver%20Parallelism%20Experiment.ipynb). Compare `GROUP_PROCESSING_PARALLELISM = 1` with `2`, keeping other settings fixed and using a distinct `TABLE_PREFIX` for each run.
+For an opt-in table-group concurrency trial across Well, Wellbore, WellLog, WellboreMarkerSet, WellboreTrajectory, and CoordinateReferenceSystem kinds, import [ADME ACZ Silver Parallelism Experiment.ipynb](ADME%20ACZ%20Silver%20Parallelism%20Experiment.ipynb). Compare `GROUP_PROCESSING_PARALLELISM = 1` with `2`, keeping inputs and resources fixed and using a distinct `TABLE_PREFIX` for each run. Full refresh, schema preflight, batched metadata and `OUTPUT_WRITE_PARALLELISM = 1` are required. Run trials sequentially in a dedicated test lakehouse: output prefixes do not isolate metadata tables or schema caches. The experiment is not a production scheduling recommendation.
 
 ## Customer configuration
 
@@ -131,6 +131,10 @@ Leave advanced settings at their defaults unless one of these needs applies.
 
 `ADME_INCREMENTAL` and `ADME_REASSEMBLE` are still accepted as compatibility aliases for older scheduled runs. Prefer `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE` for new runs.
 
+### Migrating existing automation
+
+Use `inspect`, `dry_run`, or `execute` for `RUN_PROFILE` and `ADME_RUN_PROFILE`; replace legacy `interactive` with `inspect` and `full` with `execute`. Set `WRITE_MODE` explicitly: `execute` does not select full refresh. Update sample-file references to `samples/config/inspect_sp.json` and `samples/config/scheduled_execute_mi.json`.
+
 ## Selecting kinds
 
 `KINDS` can include explicit OSDU kind URNs or bronze-driven wildcard selectors. Wildcards are expanded from distinct `kind` values in the configured bronze table:
@@ -183,13 +187,25 @@ Direct notebook execution keeps `ADME_AUTH_METHOD = "SP"` as the default because
 
 Device-code authentication reuses its signed-in account and MSAL token cache within the current notebook session, including when helper cells are rerun. Valid access tokens are reused; renewal first attempts silent acquisition or refresh. A device-code prompt is shown only when no usable session exists or Microsoft Entra ID requires interaction. Authentication caches are isolated by method, tenant/authority, client or managed identity, and token scope; tokens are kept in memory, not written to lakehouse files. Restarting the notebook session clears the cache and requires a fresh sign-in.
 
-For scalar top-level `data` fields declared with `x-osdu-relationship`, the parent retains its raw reference field and does not add duplicate `<field>__fk_id` or `<field>__fk_version` columns. With `WRITE_RELATIONSHIP_BRIDGES = True`, the pipeline writes one bridge table per source kind family, relationship path and declared target type, so consumers do not need to filter a shared bridge table to isolate a relationship. With `WRITE_RELATIONSHIP_BRIDGES = False` (or `ADME_WRITE_RELATIONSHIP_BRIDGES=false`), bridge planning, resolution, and writes are skipped while raw references remain on parent rows; existing bridge tables are not deleted or refreshed. A later upsert cannot reconcile changes made while bridge writes were disabled, so run an authorized full refresh before relying on re-enabled bridges. Bridge output is independent of `OUTPUT_MODE` and supports both `VERSION_STRATEGY` values. With `VERSION_STRATEGY = "merge"`, all schema versions in a family share that bridge table; for example, the `1.0.0` Well relationship shown as `relationship__osdu_wks_master_data_well_1_0_0__data_existencekind__reference_data_existencekind` in `versioned_tables` is named `relationship__osdu_wks_master_data_well__data_existencekind__reference_data_existencekind` in `merge`. With `versioned_tables`, the bridge name includes the source schema version, matching its versioned parent table. Each resolved link has source and target identities, source table, property path, raw reference, target active state, status, and run id. This includes scalar 1:1 and 1:N relationships; consumers can use rows with `status = "resolved"` as Fabric ontology mapping data. Explicit versions resolve exactly and unversioned references resolve to the latest numeric record version for the declared target type, including inactive latest records. References without a matching target are retained in the parent raw field but do not become bridge rows. Array-valued relationships and relationships nested within array elements remain out of scope.
+## Scalar relationship bridges
+
+For scalar top-level `data` fields declared with `x-osdu-relationship`, the parent retains its raw reference field and does not add duplicate `<field>__fk_id` or `<field>__fk_version` columns. With `WRITE_RELATIONSHIP_BRIDGES = True`, the pipeline writes one bridge table per source kind family, relationship path and declared target type, so consumers do not need to filter a shared bridge table to isolate a relationship.
+
+With `WRITE_RELATIONSHIP_BRIDGES = False` (or `ADME_WRITE_RELATIONSHIP_BRIDGES=false`), bridge planning, resolution, and writes are skipped while raw references remain on parent rows; existing bridge tables are not deleted or refreshed. A later upsert cannot reconcile changes made while bridge writes were disabled, so run an authorized full refresh before relying on re-enabled bridges.
+
+Bridge output is independent of `OUTPUT_MODE` and supports both `VERSION_STRATEGY` values. With `VERSION_STRATEGY = "merge"`, all schema versions in a family share that bridge table; for example, the `1.0.0` Well relationship shown as `relationship__osdu_wks_master_data_well_1_0_0__data_existencekind__reference_data_existencekind` in `versioned_tables` is named `relationship__osdu_wks_master_data_well__data_existencekind__reference_data_existencekind` in `merge`. With `versioned_tables`, the bridge name includes the source schema version, matching its versioned parent table.
+
+Each resolved link has source and target identities, source table, property path, raw reference, target active state, status, and run id. This includes scalar 1:1 and 1:N relationships; consumers can use rows with `status = "resolved"` as Fabric ontology mapping data. Explicit versions resolve exactly and unversioned references resolve to the latest numeric record version for the declared target type, including inactive latest records. References without a matching target are retained in the parent raw field but do not become bridge rows. Array-valued relationships and relationships nested within array elements remain out of scope.
+
+Resolution reflects the target snapshot when a referring source row is processed. Incremental target-only updates or tombstones do not revisit unchanged referring sources. Run an authorized full refresh of affected referring kinds when those target changes must be reflected immediately. A matched target with unknown/null `isActive` can have `status = "resolved"`; consumers requiring confirmed-active targets must also filter `target_is_active = true`.
 
 ## Upsert mode, watermarks, and merge keys
 
 The default `MERGE_KEY_COLUMNS = ["id", "version"]` treats the bronze `version` column as the OSDU record version. This allows multiple versions of the same record `id` to coexist in Silver Layer tables and makes repeated upsert runs idempotent for the same `id + version` pair.
 
 Do not confuse the bronze record `version` column with `schema_version`, which is derived from the kind URN. In `WRITE_MODE = "upsert"`, parent or wide rows are merged by `MERGE_KEY_COLUMNS`, and child rows are replaced using the same key columns.
+
+With bridge upserts enabled, merge keys must be drawn from `id`, `version`, and `kind`. Bridge replacement maps those effective keys to their `source_` columns, including ID-only parent replacement. Payload-derived merge keys require bridges to be disabled. Watermark advancement is deferred until bridge publication succeeds so a bridge-write failure remains retryable; this is not a transaction across tables, and failed runs can still leave partial outputs.
 
 By default, `INCREMENTAL_WATERMARK_COLUMN = "ingestTime"` uses the ACZ bronze update timestamp to prune incremental upsert runs to affected concrete kinds before schema preflight and group processing. Active changed rows are transformed and upserted; rows explicitly marked `isActive = false` hard-delete matching Silver parent/wide and child rows by `MERGE_KEY_COLUMNS` so the default Silver outputs remain active-only. If `INCLUDE_INACTIVE_RECORDS = True`, inactive rows are included in the transformed Silver outputs instead of being hard-deleted. Use `INCREMENTAL_WATERMARK_MODE = "required"` when a scheduled job must fail rather than process all selected rows if the watermark column is missing.
 
@@ -210,15 +226,34 @@ The notebook is organized into these executable sections:
 | Setup checklist | Validates tenant configuration, bronze access, ADME schema access, output table names, and planned output tables without writing Silver tables. |
 | Smoke test bronze access | Reads at most one row for the first configured kind without writing Silver tables. |
 | Run pipeline | Prints settings and next steps when `inspect`, previews writes when `dry_run`, or executes when `execute`. |
-| Results summary | Displays the per-kind result table. |
+| Results summary | Displays per-kind status, separate child/bridge counts, and a deduplicated bridge inventory without additional data scans. |
 
 ## Development layout
 
-### Schema-driven full-rebuild reference
+### Packaged schema-driven full rebuild
 
-`ADME ACZ Silver Reference.ipynb` is a separate, self-contained reference path that reads `osducatalog` directly. It does not consume or change the compatibility notebook's output. Configure the source/destination lakehouse paths and upload exact exported schema files to `Files/adme-schemas`; filenames replace kind colons with underscores. Publication defaults to `False`.
+The optional `schema_contract.py`, `silver.py`, and `silver_publish.py` modules provide a separate full-rebuild API for application developers. They are not called by the customer notebook and do not change its active-only, upsert, or bridge contracts. There is no additional reference notebook to import. Callers provide exact schema documents and a Spark session, build candidate outputs, and explicitly invoke publication into a separate destination.
 
-| Contract | Reference behavior |
+The calling application supplies `spark`, `source_path`, `schema_directory`, `table_root`, and `journal_root`. Exported schema filenames replace kind colons with underscores. Use a separate output root and a fresh run ID:
+
+```python
+from uuid import uuid4
+
+from adme_acz_silverlayer.schema_contract import load_schema_directory
+from adme_acz_silverlayer.silver import build_silver, release_silver
+from adme_acz_silverlayer.silver_publish import publish_silver, read_pinned_source
+
+source, snapshot = read_pinned_source(spark, source_path)
+kinds = [row.kind for row in source.select("kind").distinct().collect()]
+schemas = load_schema_directory(schema_directory, kinds)
+candidate = build_silver(source, schemas, run_id=uuid4().hex)
+try:
+    manifest = publish_silver(candidate, snapshot, table_root, journal_root)
+finally:
+    release_silver(candidate)
+```
+
+| Contract | Packaged behavior |
 | --- | --- |
 | Snapshot | Pin one source Delta version before discovering kinds or reading records. |
 | Root grain | Preserve all source rows and columns, including `isActive`; identity is `(id, version)`. |
@@ -232,26 +267,18 @@ The notebook is organized into these executable sections:
 
 The source requires string `id`/`kind`, JSON-string `data`, Boolean `isActive`, and string or exact integer `version`. Payloads may be entity data or Storage envelopes with matching identity; wrapper metadata is projected where available, while raw source columns stay unchanged. Native ACZ timestamps are represented as UTC ISO strings in schema projections without changing the original timestamp columns. Schema integers use Spark's signed 64-bit type; record versions retain their original exact representation. Empty snapshots, ambiguous numeric versions/payload wrappers, missing exact schemas, invalid declared value types, malformed JSON, external/cyclic schema references, tuple arrays, references inside opaque `additionalProperties` maps, and table/case-insensitive field collisions stop the run before publication. This representation contract is **not full JSON Schema validation**: compatible alternatives combine fields/relationship targets, while required fields, branch assertions, enums, bounds, formats and conditional schemas are not enforced. Preserved ACL/legal metadata does not enforce ADME entitlements in Fabric; govern destination access separately.
 
-Outputs use the existing kind/child naming helpers and have a default `gen_silver_` prefix. Publication appends `__run_<run_id>` to each physical table folder. The relationship bridge stores logical table keys; the run manifest maps those keys to physical paths. Consumers must select all outputs and `versionAsOf` values from **one** `Files/silver-reference/<run_id>/succeeded.json`, not from mixed table-name tips. Failed runs retain their partial inventory and propagate the error. Multi-table publication is manifest-gated, not a Delta transaction; there is no automatic rollback. Keep the previous successful manifest for recovery, rebuild with a new ID, and retain pinned Delta versions/files while consumers need them. SQL endpoint discovery is asynchronous and is not part of the publish guarantee.
+Outputs use the existing kind/child naming helpers and have a default `gen_silver_` prefix. Publication appends `__run_<run_id>` to each physical table folder. The relationship bridge stores logical table keys; the run manifest maps those keys to physical paths. Consumers must select all outputs and `versionAsOf` values from **one** successful run manifest under the caller's manifest root, not from mixed table-name tips. Failed runs retain their partial inventory and propagate the error. Multi-table publication is manifest-gated, not a Delta transaction; there is no automatic rollback. Keep the previous successful manifest for recovery, rebuild with a new ID, and retain pinned Delta versions/files while consumers need them. SQL endpoint discovery is asynchronous and is not part of the publish guarantee.
 
-The reference notebook is generated from `schema_contract.py`, `silver.py`, `silver_publish.py` and the shared naming/alias helpers. Its short control cells explain setup, snapshot pinning, candidate validation, publication and recovery; implementation cells are collapsed but inspectable. Regenerate it after source changes:
-
-```shell
-python scripts/sync_notebook.py --reference
-python scripts/sync_notebook.py --reference --check --summary
-python -m unittest discover -s tests -q
-```
-
-`test_schema_contract.py` covers pure projection/reference rules, `test_silver.py` runs real synthetic Spark transformations and injects publication failures, and `test_reference_notebook.py` verifies source parity, deterministic generation, syntax and hygiene. Optional `test_delta_silver.py` runs the generated implementation against real local Delta, including pinned input after a later commit and immutable output publication:
+`test_schema_contract.py` covers pure projection/reference rules; `test_silver.py` exercises synthetic Spark transformations and publication failures. Optional `test_delta_silver.py` exercises real local Delta, including pinned input after a later commit and immutable output publication:
 
 ```shell
 python -m pip install -e ".[delta]"
 python -m unittest discover -s tests -p test_delta_silver.py -q
 ```
 
-The optional Delta package must match the installed Spark/Python/Java runtime; its launcher may fetch matching Maven artifacts on first use. Fabric supplies Delta itself and does not require that package for the self-contained notebook. Before scheduling in Fabric, preview the source, review reference diagnostics, publish to a separate destination, and smoke-test the successful manifest's pinned outputs and filesystem permissions. Source/manifest retention and obsolete-run cleanup are explicit operational responsibilities.
+The optional Delta package must match the installed Spark/Python/Java runtime; its launcher may fetch matching Maven artifacts on first use. Fabric supplies Delta itself and does not require that package for the self-contained notebook. Before scheduling a packaged rebuild, preview the source, review diagnostics, publish to a separate destination, and smoke-test the successful manifest's pinned outputs and filesystem permissions. Source/manifest retention and obsolete-run cleanup are explicit operational responsibilities.
 
-### Compatibility notebook helpers
+### Self-contained notebook helpers
 
 The customer-facing artifact remains `ADME ACZ Silver Layer.ipynb`. Customer runs in Microsoft Fabric should not need any helper `.py` files deployed beside the notebook.
 
@@ -274,15 +301,22 @@ python -m unittest discover -s tests -q
 
 `--check` validates the notebook format, required section order, absence of code-cell outputs, the self-contained contract, and synchronization of the shared Spark helper definitions. Running without `--check` embeds those definitions from the package source and removes execution artifacts. Edit the shared functions in `spark_schema.py` or `normalization.py`, then run the sync command; do not maintain separate copies manually. The `SHARED_SPARK_HELPERS` inventory in `notebook_sync.py` declares the synchronized functions and their type/naming constants. Synchronization reads Python source without importing PySpark or executing notebook cells.
 
+The group-concurrency experiment is generated from the main notebook. Its generator changes trial settings and group dispatch while reusing the production transformation, authentication, publication and summary code. After changing the main notebook, regenerate and check the experiment:
+
+```shell
+python scripts/sync_parallelism_experiment.py
+python scripts/sync_parallelism_experiment.py --check
+```
+
 ### Notebook integration tests
 
-`tests/test_notebook_integration.py` executes every code cell of the committed notebook on local Spark and Delta (`tests/notebook_runner.py` overrides the customer settings). `OfflineNotebookRunTests` use synthetic bronze rows and a stubbed schema service and token, and verify active-record filtering, child tables, relationship bridges and run metadata. `tests/test_notebook_tno_integration.py` runs the notebook on real Spark and Delta with public OSDU TNO records (`tests/tno_bronze.py`, pinned to a commit of the `osdu/platform/data-flow/data-loading/open-test-data` project, Well and Wellbore master data) against a fake ADME schema service. `tests/fake_adme.py` is a local HTTPS server (self-signed certificate, ports 20000-29999) that serves the public OSDU `data-definitions` schemas, bundled with their abstract schemas inlined, and checks the bearer token and `data-partition-id`. No tenant data, Azure identity or live ADME instance is involved; the first run needs network access to `community.opengroup.org` (downloads are cached in the system temporary directory). `ADME_ACZ_TNO_RECORDS` (default 10) sets the number of wells and wellbores.
+`tests/test_notebook_integration.py` executes every code cell of the committed notebook on local Spark and Delta (`tests/notebook_runner.py` overrides the customer settings). `OfflineNotebookRunTests` use synthetic bronze rows and a stubbed schema service and token, and verify active-record filtering, child tables, relationship bridges and run metadata. `tests/test_notebook_tno_integration.py` runs the notebook on real Spark and Delta with public OSDU TNO records (`tests/tno_bronze.py`, pinned to a commit of the `osdu/platform/data-flow/data-loading/open-test-data` project, Well and Wellbore master data) against a fake ADME schema service. `tests/fake_adme.py` is a local HTTPS server (self-signed certificate, OS-assigned port) that serves the public OSDU `data-definitions` schemas, bundled with their abstract schemas inlined, and checks the bearer token and `data-partition-id`. Local Spark sessions use their default port allocation. No tenant data, Azure identity or live ADME instance is involved; the first run needs network access to `community.opengroup.org` (downloads are cached in the system temporary directory). `ADME_ACZ_TNO_RECORDS` (default 10) sets the number of wells and wellbores.
 
 `LiveNotebookRunTests` are opt-in and call a real ADME schema service with `ADME_AUTH_METHOD = "CLI"`, comparing published row counts with the active bronze records. They regenerate bronze from the same TNO data, or read a local bronze Delta copy from `ADME_ACZ_LIVE_BRONZE_PATH` (tenant data; never commit it). `ADME_ACZ_LIVE_TNO_RECORDS` (default 25) sets the record count.
 
 ```shell
 az login
-ADME_ACZ_LIVE_ENDPOINT=https://<instance>.energy.azure.com ADME_ACZ_LIVE_PARTITION=<partition> \
+ADME_ACZ_LIVE_ENDPOINT="https://<instance>.energy.azure.com" ADME_ACZ_LIVE_PARTITION="<partition>" \
   python -m unittest discover -s tests -p test_notebook_integration.py -q
 python tests/tno_bronze.py --output /tmp/tno-bronze --wells 5 --wellbores 5   # write the bronze table only
 ```
@@ -299,9 +333,11 @@ The offline and fake-ADME tests need nothing else. For the live tests, run `az l
 
 `.github/workflows/tests.yml` runs the unit, offline and fake-ADME integration tests on pull requests and pushes to `main`. It does not call a live ADME instance; the live tests are skipped there and are run manually.
 
-The `integration` extra pins the Fabric notebook runtime versions (Python 3.13, PySpark 4.1, delta-spark 4.2, Java 21); update the pins when Fabric upgrades its Spark runtime. Keep PySpark and delta-spark on matching major versions; mixed versions fail Delta overwrites with "does not support truncate in batch mode".
+The `integration` extra constrains PySpark to `>=4.1,<4.2` and delta-spark to `>=4.2,<4.3`. Python 3.13 and Java 21 are the tested local/CI runtime; package extras do not install or pin Python or Java. Match the selected Fabric runtime when comparing performance, and use a compatible Spark/Delta release pair rather than independently upgrading either package.
 
-`tests/test_notebook_modes.py` runs the notebook for the paths the default runs do not reach: upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, the output-shape helpers, and the SP, DC, MI and CLI authentication branches. Every notebook function that the pipeline can reach runs in at least one test layer.
+`tests/test_notebook_modes.py` exercises upsert with the incremental watermark and inactive-record deletes, wide output with versioned tables and data-quality issues, schema inference for kinds missing from the schema service, the dry-run profile, output-shape helpers, and the SP, DC, MI and CLI authentication branches. These tests cover selected scenarios, not every input shape, cloud identity setup or Fabric runtime behavior.
+
+`tests/test_parallelism_experiment.py` checks deterministic generation, shared-implementation parity, safe settings, actual schema-preflight success, isolated concurrent metadata buffers, and result ordering. Its optional real Delta scenario runs the generated notebook with group parallelism 1 and 2 and compares output schemas and rows, excluding generated run/time values and prefix-dependent source-table names.
 
 ### Optional local Spark tests
 
@@ -343,7 +379,7 @@ After a successful run, review:
 - `silver_schema_cache` when persisted schema caching is enabled.
 - `silver_incremental_state` when watermark-based source filtering is enabled.
 - `silver_output_documentation` for generated table and column documentation.
-- The Results summary cell for a quick per-kind view of status, rows, output table name, child count, validation, and error text.
+- The Results summary cell for per-kind status, rows, parent table, separate array-child and relationship-bridge counts, validation, and errors. Its bridge inventory deduplicates shared table names and lists source kinds, parents, and processing statuses. It uses existing results without scanning Delta: it does not report bridge row counts or independently certify publication.
 
 If a kind has no matching bronze records, the run returns `skipped` for that kind.
 

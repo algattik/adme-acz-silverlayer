@@ -5,9 +5,11 @@ import json
 import os
 import re
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 from urllib.parse import quote
 
 try:
@@ -144,6 +146,65 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
 class NotebookSimplificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.nb = load_notebook()
+
+    def test_failed_group_does_not_publish_its_preflight_bridge_tables(self) -> None:
+        build = extract_functions(self.nb, ["run_silver_build"])["run_silver_build"]
+        namespace = build.__globals__
+        kinds = ["example:wks:master-data--Failed:1.0.0", "example:wks:master-data--Ready:1.0.0"]
+        tables = {kinds[0]: "relationship__failed", kinds[1]: "relationship__ready"}
+        groups = [{"group_key": kind, "kinds": [kind]} for kind in kinds]
+        frame = mock.MagicMock()
+        frame.columns = ["id", "version", "kind", "isActive"]
+        frame.select.return_value = frame
+        frame.persist.return_value = frame
+        frame.where.return_value = frame
+        frame.drop.return_value = frame
+        writes = []
+
+        def result(**values):
+            return SimpleNamespace(**{
+                "records_processed": 0, "records_failed": 0, "reassembled": False,
+                "child_tables": [], "error": None, "validation_passed": True, **values,
+            })
+
+        def process(_spark, group, *args, **kwargs):
+            kind = group["group_key"]
+            if kind == kinds[0]:
+                raise ValueError("Injected group failure")
+            kwargs["relationship_frames"].append(frame)
+            kwargs["relationship_bridge_tables"].append(tables[kind])
+            return [result(kind=kind, status="success", parent_table="ready", child_tables=[tables[kind]])]
+
+        namespace.update({
+            "perf_counter": lambda: 0, "datetime": datetime, "UTC": timezone.utc,
+            "uuid": SimpleNamespace(uuid4=lambda: "fixture-run"), "logger": mock.Mock(),
+            "traceback": mock.Mock(), "KindResult": result, "F": mock.MagicMock(),
+            "_effective_merge_key_columns": lambda value: value or ["id", "version"],
+            "_watermark_active": lambda *args: False, "_processing_limits_active": lambda *args: False,
+            "_include_inactive_records": lambda: False, "prepare_bronze_df": lambda *args, **kwargs: (frame, False),
+            "ensure_resolved_kinds": lambda *args, **kwargs: kinds,
+            "group_kinds_by_version_strategy": lambda *args: groups,
+            "validate_adme_schema_service_access": lambda: "synthetic",
+            "validate_build_plan_or_raise": lambda *args: ["failed", "ready"],
+            "_assert_overwrite_allowed": mock.Mock(), "write_run_status": mock.Mock(),
+            "preflight_kind_counts": False, "prefetch_schema_registry": lambda *args, **kwargs: (mock.Mock(), {}),
+            "relationship_bridge_tables_for_kind": lambda kind, *args: [tables[kind]],
+            "_metadata_table_names": lambda *args: [], "validate_table_names": mock.Mock(),
+            "read_bronze_table_spark": lambda *args, **kwargs: frame,
+            "_storage_level_from_name": lambda *args: None, "process_kind_group": process,
+            "table_name_for_kind_group": lambda group, prefix: group["group_key"],
+            "run_info_row": lambda *args: (), "run_manifest_row": lambda *args: (),
+            "_union_frames": lambda frames: frame,
+            "write_silver_tables": lambda batch, **kwargs: writes.extend(target for _, target in batch),
+            "_buffer_or_write_output_documentation": mock.Mock(),
+            "write_incremental_watermark_state": mock.Mock(),
+            "flush_metadata_buffers": lambda spark, info, manifest, *args: (info.clear(), manifest.clear()),
+            "_output_tables_from_results": lambda *args: [],
+            "print": lambda *args, **kwargs: None,
+        })
+        results = build(object(), kinds, "workspace", "lakehouse", bronze_table="bronze", allow_overwrite=True)
+        self.assertEqual([item.status for item in results], ["failed", "success"])
+        self.assertEqual(writes, ["relationship__ready"])
 
     @unittest.skipUnless(importlib.util.find_spec("pandas"), "Install pandas for results display tests.")
     def test_results_summary_separates_and_deduplicates_bridges(self) -> None:
@@ -454,7 +515,7 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("relationship_frames=relationship_frames", source)
         self.assertIn("relationship_changed_key_frames=relationship_changed_key_frames", source)
         self.assertIn("relationship_bridge_tables=relationship_bridge_tables", source)
-        self.assertIn('["source_id", "source_version", "source_kind"]', source)
+        self.assertIn('relationship_merge_keys = [f"source_{key}" for key in merge_keys]', source)
         self.assertNotIn("__fk_id", source)
         self.assertNotIn("__fk_version", source)
 

@@ -62,6 +62,12 @@ def _merge_plans(plans: list[dict], alternative: bool) -> dict:
         elif any("variants" in plan for plan in plans):
             result["variants"] = [variant for plan in plans for variant in plan.get("variants", [plan])]
 
+    result.update(_merge_relationship_annotations(plans, alternative))
+    return result
+
+
+def _merge_relationship_annotations(plans: list[dict], alternative: bool) -> dict:
+    result = {}
     declarations = [plan["targets"] for plan in plans if plan.get("targets") is not None]
     if declarations:
         if alternative:
@@ -170,19 +176,18 @@ def compile_schema(schema: dict, kind: str) -> dict:
 
         result = _merge_plans(plans, False)
         targets = _relationship_targets(node)
-        if targets is not None:
-            result["targets"] = targets
         pattern = node.get("pattern")
         if pattern is not None:
             if not isinstance(pattern, str):
                 raise ValueError("Schema reference patterns must be strings")
             re.compile(pattern, re.ASCII)
-            result["pattern"] = pattern
+        result.update(_merge_relationship_annotations(
+            [result, {"targets": targets, "pattern": pattern}], False
+        ))
         if result["type"] == "array" and result["targets"] is not None:
             result["items"] = {
                 **result["items"],
-                "targets": result["targets"],
-                "pattern": result["pattern"] or result["items"].get("pattern"),
+                **_merge_relationship_annotations([result["items"], result], False),
             }
             result["targets"] = None
         return result

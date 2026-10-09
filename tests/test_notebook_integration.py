@@ -14,13 +14,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fake_adme import free_port
 from notebook_runner import run_notebook
 from test_normalization import ROOT, T, java_is_available
 from tno_bronze import BRONZE_DDL, write_bronze
 
 if T is not None:
     from pyspark.sql import SparkSession
+
+INTEGRATION_DEPENDENCIES_AVAILABLE = all(
+    importlib.util.find_spec(name) is not None
+    for name in ("delta", "requests", "msal", "azure", "pandas", "pyarrow", "cryptography")
+) and importlib.util.find_spec("azure.identity") is not None
 
 WELL_KIND = "osdu:wks:master-data--Well:1.0.0"
 WELL_SCHEMA = {
@@ -59,16 +63,12 @@ def bronze_row(record_id, version, payload, active=True, kind=WELL_KIND, modify_
 def build_session(warehouse: str):
     from delta import configure_spark_with_delta_pip
 
-    driver_port = free_port(3)
     builder = (
         SparkSession.builder.master("local[2]").appName("notebook-integration")
         .config("spark.ui.enabled", "false")
         .config("spark.driver.host", "127.0.0.1")
         .config("spark.driver.bindAddress", "127.0.0.1")
         .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.driver.port", str(driver_port))
-        .config("spark.driver.blockManager.port", str(driver_port + 1))
-        .config("spark.blockManager.port", str(driver_port + 2))
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.sql.warehouse.dir", warehouse)
@@ -78,8 +78,8 @@ def build_session(warehouse: str):
     return spark
 
 
-@unittest.skipIf(T is None or importlib.util.find_spec("delta") is None,
-                 "Install optional [spark] and [delta] dependencies for notebook integration tests.")
+@unittest.skipIf(T is None or not INTEGRATION_DEPENDENCIES_AVAILABLE,
+                 "Install optional [integration] dependencies for notebook integration tests.")
 class NotebookIntegrationBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
