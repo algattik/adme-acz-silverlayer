@@ -71,4 +71,7 @@ def metadata_table_names(
         metadata_table_name(workspace_id, lakehouse_id, output_docs_table),
         metadata_table_name(workspace_id, lakehouse_id, data_quality_issues_table),
         metadata_table_name(workspace_id, lakehouse_id, incremental_state_table),
+        "silver_writer_guard",
+        "silver_publication_attempts",
+        "silver_output_ownership",
     ]
