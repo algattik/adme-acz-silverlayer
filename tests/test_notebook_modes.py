@@ -359,6 +359,80 @@ class RelationshipAliasCollisionTests(NotebookIntegrationBase):
                 self.assertCountEqual(source_rows, self.read("osducatalog").where(f"kind = '{WELL_KIND}'").collect())
 
 
+class LongArrayTableNameTests(NotebookIntegrationBase):
+    def test_bounded_arrays_publish_update_and_delete_inactive_sources(self):
+        kind = f"osdu:wks:master-data--W{'x' * 110}:1.0.0"
+        prefix = "arr_"
+        schema = copy.deepcopy(WELL_SCHEMA)
+        array_schema = {
+            "type": "array",
+            "items": {"type": "object", "properties": {"label": {"type": "string"}}},
+        }
+        schema["properties"]["data"] = {
+            "type": "object",
+            "properties": {
+                "x": array_schema,
+                "SpatialLocation": {
+                    "type": "object",
+                    "properties": {
+                        "AsIngestedCoordinates": {
+                            "type": "object",
+                            "properties": {"features": array_schema},
+                        },
+                    },
+                },
+            },
+        }
+
+        def configure(namespace):
+            namespace["_adme_schema_get_json"] = (
+                lambda url, *args, **kwargs: [] if "latestVersion" in url else {"schema": schema}
+            )
+
+        settings = {
+            "RUN_PROFILE": "execute", "KINDS": [kind], "TABLE_PREFIX": prefix,
+            "VERSION_STRATEGY": "merge", "INCREMENTAL_WATERMARK_MODE": "auto",
+            "CREATE_EMPTY_CHILD_TABLES": True, "WRITE_RELATIONSHIP_BRIDGES": False,
+        }
+        expected_tables = None
+        for mode, value, active, ingest in (
+            ("full_refresh", "alpha", True, EARLIER),
+            ("upsert", "beta", True, LATER),
+            ("upsert", "beta", False, LATEST),
+        ):
+            with self.subTest(mode=mode, active=active):
+                payload = {
+                    "x": [{"label": value}],
+                    "SpatialLocation": {"AsIngestedCoordinates": {"features": [{"label": value}]}},
+                }
+                write_bronze(self.spark, [row("test:well:bounded", "0007", payload, kind=kind, active=active, ingest=ingest)])
+                namespace = run(self.spark, {**settings, "WRITE_MODE": mode}, configure=configure)
+                self.assertTrue(all(result.status != "failed" for result in namespace["results"]))
+                parent = namespace["results"][0].parent_table
+                self.assertEqual(len(parent), 124)
+                tables = {
+                    namespace["child_table_name"](parent, source)
+                    for source in ("data__x", "data__SpatialLocation__AsIngestedCoordinates__features")
+                }
+                self.assertEqual(len(tables), 2)
+                self.assertTrue(all(len(table) == 128 for table in tables))
+                self.assertIn(parent + "___x", tables)
+                self.assertTrue(any(not table.startswith(parent + "___") for table in tables))
+                if expected_tables is not None:
+                    self.assertEqual(tables, expected_tables)
+                expected_tables = tables
+                self.assertEqual(self.read(parent).count(), int(active))
+                for table in tables:
+                    records = self.read(table).collect()
+                    self.assertEqual(
+                        {(record.record_key, record.ordinal, record.label) for record in records},
+                        {("test:well:bounded:0007", 0, value)} if active else set(),
+                    )
+                self.assertTrue(tables.issubset(set(namespace["_validated_historical_outputs"](
+                    self.spark, parent, namespace["workspace_id"], namespace["lakehouse_id"],
+                ))))
+
+
 class LongRelationshipTableNameTests(NotebookIntegrationBase):
     def test_bounded_bridges_publish_update_and_delete_inactive_sources(self):
         kinds = {

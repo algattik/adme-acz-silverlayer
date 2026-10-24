@@ -32,6 +32,11 @@ def relationship_helpers():
         "_project_relationship_fields",
         "_bounded_relationship_name",
         "_validated_historical_outputs",
+        "_child_table_prefix",
+        "_child_table_suffix",
+        "_sanitize_table_name_part",
+        "child_table_name",
+        "_is_array_child",
         "validate_table_names",
         "kind_to_table_name",
         "kind_to_versioned_table_name",
@@ -49,7 +54,7 @@ def relationship_helpers():
     ast.fix_missing_locations(module)
     namespace = {
         "Column": object, "DataFrame": object, "SchemaRegistry": object, "re": re, "hashlib": hashlib,
-        "_TABLE_NAME_PATTERN": re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$"),
+        "_TABLE_NAME_PATTERN": re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$"), "_DATA_PREFIX": "data__",
     }
     if T is not None:
         namespace.update({
@@ -196,6 +201,31 @@ class RelationshipFieldIdentityTests(unittest.TestCase):
                     self.assertFalse(helpers["_is_relationship_bridge"](parent + "___items", parent))
                     self.assertFalse(helpers["_is_relationship_bridge"](parent, parent))
                     self.assertFalse(helpers["_is_relationship_bridge"](helpers["_relationship_table_prefix"](parent), parent))
+
+    def test_bounded_array_names_preserve_ownership_and_remain_distinct_from_bridges(self):
+        helpers = relationship_helpers()
+        for length in (106, 107, 108, 124, 128):
+            kind = f"osdu:wks:master-data--{'x' * (length - len('osdu_wks_'))}:1.0.0"
+            parent = helpers["kind_to_table_name"](kind)
+            arrays = [helpers["child_table_name"](parent, path) for path in ("data__x", "data__nested__" + "features" * 20)]
+            bridge = helpers["relationship_bridge_table_name"](
+                kind, "data__FacilityTypeID", "reference-data--FacilityType", version_strategy="merge",
+            )
+            with self.subTest(parent_length=length):
+                for table in arrays:
+                    helpers["validate_table_names"]([table])
+                    self.assertTrue(helpers["_is_array_child"](table, parent))
+                    self.assertFalse(helpers["_is_relationship_bridge"](table, parent))
+                self.assertFalse(helpers["_is_array_child"](bridge, parent))
+                self.assertFalse(helpers["_is_array_child"](helpers["_child_table_prefix"](parent), parent))
+                allowed = [*arrays, bridge]
+                helpers["_manifest_child_tables_for_parent"] = lambda *args: allowed
+                self.assertEqual(helpers["_validated_historical_outputs"](None, parent, "", ""), allowed)
+                other_parent = parent[:-1] + "y"
+                foreign = helpers["child_table_name"](other_parent, "data__nested__" + "features" * 20)
+                helpers["_manifest_child_tables_for_parent"] = lambda *args: [*allowed, foreign]
+                with self.assertRaisesRegex(RuntimeError, "ownership namespace"):
+                    helpers["_validated_historical_outputs"](None, parent, "", "")
 
     def test_paths_and_bridge_names_preserve_colliding_field_identities(self):
         helpers = relationship_helpers()

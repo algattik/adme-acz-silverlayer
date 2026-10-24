@@ -144,6 +144,86 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
     return {name: namespace[name] for name in function_names}
 
 
+class TypedArrayExtractionTests(unittest.TestCase):
+    """Exercise notebook extraction decisions with Spark execution boundaries mocked."""
+
+    FEATURES = "data__SpatialLocation__AsIngestedCoordinates__features"
+    CHILD = "osdu_wks_well___spatiallocation__asingestedcoordinates__features"
+
+    def extract_features(self, values: list, create_empty: bool):
+        class StructType:
+            pass
+
+        class StringType:
+            pass
+
+        class ArrayType:
+            def __init__(self, element_type):
+                self.elementType = element_type
+
+        types = SimpleNamespace(
+            DataType=object, StructType=StructType, StringType=StringType, ArrayType=ArrayType,
+        )
+        with mock.patch.dict(globals(), {"SparkTypes": types}):
+            funcs = extract_functions(
+                load_notebook(),
+                [
+                    "_extract_typed_arrays",
+                    "_sanitize_table_name_part",
+                    "_child_table_suffix",
+                    "_child_table_prefix",
+                    "child_table_name",
+                    "_add_child_table",
+                ],
+            )
+
+        parent = mock.Mock(spec=["schema", "columns", "drop"])
+        element_type = StructType()
+        parent.schema = SimpleNamespace(
+            fields=[SimpleNamespace(name=self.FEATURES, dataType=ArrayType(element_type))],
+        )
+        parent.columns = ["id", "version", self.FEATURES]
+        parent.drop.return_value = SimpleNamespace(columns=["id", "version"])
+        child = object()
+        explode = mock.Mock(return_value=child)
+        extract = funcs["_extract_typed_arrays"]
+        extract.__globals__.update(
+            logger=mock.Mock(),
+            create_empty_child_tables=create_empty,
+            _batch_sample_string_arrays=mock.Mock(return_value={}),
+            _batch_sample_array_presence=mock.Mock(
+                return_value={self.FEATURES: any(value is not None and len(value) > 0 for value in values)},
+            ),
+            _explode_typed_array=explode,
+        )
+        children, projected, _ = extract(parent, "osdu_wks_well")
+        return children, projected, parent, child, explode, element_type
+
+    def test_empty_struct_arrays_are_removed_from_parent_and_honor_empty_child_setting(self) -> None:
+        for values in ([None, None], [[], []], [None, []]):
+            for create_empty in (True, False):
+                with self.subTest(values=values, create_empty_child_tables=create_empty):
+                    children, projected, _, child, _, _ = self.extract_features(values, create_empty)
+                    expected_children = {self.CHILD: (self.FEATURES, child)} if create_empty else {}
+                    self.assertEqual(
+                        (projected.columns, children),
+                        (["id", "version"], expected_children),
+                        "Empty struct arrays must not remain on normalized parents; "
+                        "CREATE_EMPTY_CHILD_TABLES controls only empty child publication.",
+                    )
+
+    def test_populated_struct_arrays_are_extracted_for_both_empty_child_settings(self) -> None:
+        for create_empty in (True, False):
+            with self.subTest(create_empty_child_tables=create_empty):
+                children, projected, parent, child, explode, element_type = self.extract_features(
+                    [None, [], [{"type": "Feature"}]], create_empty,
+                )
+                self.assertEqual(projected.columns, ["id", "version"])
+                self.assertEqual(children, {self.CHILD: (self.FEATURES, child)})
+                parent.drop.assert_called_once_with(self.FEATURES)
+                explode.assert_called_once_with(parent, self.FEATURES, element_type, schema_cache=None)
+
+
 class NotebookSimplificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.nb = load_notebook()
@@ -295,7 +375,7 @@ class NotebookSimplificationTests(unittest.TestCase):
     def test_historical_ownership_reports_rejected_tables_without_accepting_them(self) -> None:
         funcs = extract_functions(self.nb, [
             "_validated_historical_outputs", "_relationship_table_prefix", "_bounded_relationship_name",
-            "_is_relationship_bridge", "validate_table_names",
+            "_is_relationship_bridge", "validate_table_names", "_is_array_child", "_child_table_prefix",
         ])
         validate = funcs["_validated_historical_outputs"]
         validate.__globals__["_TABLE_NAME_PATTERN"] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1116,6 +1196,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             [
                 "_sanitize_table_name_part",
                 "_child_table_suffix",
+                "_child_table_prefix",
                 "child_table_name",
             ],
         )

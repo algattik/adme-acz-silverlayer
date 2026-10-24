@@ -20,6 +20,8 @@ Parent tables include the normalized kind authority and source, followed by the 
 
 Normalized and wide parents expose `record_key`: a string in `id:version` form, for example `test:master-data--Well:sample:0008`. It excludes kind and preserves the exact ID and version text, including leading zeros and arbitrarily large numeric versions. Versions must contain only ASCII digits; splitting at the final colon recovers the original ID and version without ambiguity. Original identity columns and configured merge semantics remain intact. Array and tag children carry their parent's `record_key`; it is a parent reference, not a unique child-row key. The pinned Bronze snapshot must have nonempty identities, valid numeric versions, no conflicting reserved `record_key` column (including sanitized aliases), and no exact ID/version shared across different kinds.
 
+Array child-table names of up to 128 characters are unchanged. Longer names keep a readable prefix and end with `__` plus the first 16 hexadecimal characters of the full normalized name's SHA-256 hash. When necessary, the parent portion is separately shortened to 106 characters with the same hash-suffix scheme, preserving the `___` separator and space for the child suffix. The manifest retains the exact parent/child association, and output documentation retains the source field path. Wide-output column names derive from that source path, not the shortened table name.
+
 ## Architecture
 
 ```text
