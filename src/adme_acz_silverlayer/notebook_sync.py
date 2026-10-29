@@ -35,6 +35,10 @@ LOCAL_PACKAGE_IMPORT_RE = re.compile(
 )
 
 SHARED_SPARK_HELPERS = {
+    "fabric_io": (
+        "_lakehouse_default_schema",
+        "_lakehouse_table_path",
+    ),
     "config": (
         "NOTEBOOK_PARAMETER_TYPES",
         "_parameter_bool",

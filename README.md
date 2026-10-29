@@ -136,6 +136,14 @@ Ordinary Jupyter execution evaluates the edited defaults and then the same resol
 
 By default, Silver Layer processing transforms only bronze rows where `isActive == true`; rows where `isActive` is `false` or `null` are excluded. Set the advanced `INCLUDE_INACTIVE_RECORDS = True` control, or `ADME_INCLUDE_INACTIVE_RECORDS=true`, only when inactive records should also be transformed.
 
+### OneLake table layout
+
+When an operation falls back from the attached Spark catalog to a OneLake path, the notebook calls [Get Lakehouse](https://learn.microsoft.com/rest/api/fabric/lakehouse/items/get-lakehouse) for the selected `WORKSPACE_ID` and `LAKEHOUSE_ID`. It uses the execution identity through `notebookutils.credentials.getToken("pbi")`, verifies the returned lakehouse type and IDs, and inspects `properties.defaultSchema`. A valid schema produces `Tables/<schema>/<table>`; an absent field in valid metadata produces `Tables/<table>`. The OneLake hostname comes from `notebookutils.conf.get("trident.onelake.endpoint")`.
+
+One successful lookup is cached per workspace/lakehouse pair until the helper cell is rerun. Bronze reads, output writes, merge reads and metadata paths share that layout. Authentication, HTTP and malformed-metadata failures stop path resolution; they never trigger a guessed schema-less path. No separate credentials are configured for this lookup.
+
+Path fallback accepts simple unquoted `table` or `schema.table` names with letters, digits and underscores, starting with a letter or underscore. An explicit schema is used without prepending the default schema, and is rejected for a schema-less lakehouse. Names with additional catalog/workspace qualifiers must be resolved through the Spark catalog. Catalog operations that succeed retain their existing behavior and do not require this metadata lookup.
+
 ## When to use advanced settings
 
 Leave advanced settings at their defaults unless one of these needs applies.

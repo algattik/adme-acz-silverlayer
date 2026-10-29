@@ -51,6 +51,7 @@ def extract_functions(function_names: list[str]) -> dict[str, object]:
         "ADME_SCHEMA_SERVICE_PATH": "/api/schema-service/v1/schema",
         "FABRIC_STORAGE_SCOPE": "https://storage.azure.com/.default",
         "DataFrame": object,
+        "SparkSession": object,
         "_adme_schema_config": lambda: (
             "https://contoso.energy.azure.com",
             "data",
@@ -78,6 +79,10 @@ class RuntimeBoundaryModuleTests(unittest.TestCase):
         )
         funcs["_table_path_uri"].__globals__["workspace_id"] = "workspace"
         funcs["_table_path_uri"].__globals__["lakehouse_id"] = "lakehouse"
+        funcs["_onelake_table_uri"].__globals__.update({
+            "_fabric_lakehouse_layout": lambda workspace, lakehouse: (None, "onelake.dfs.fabric.microsoft.com"),
+            "_lakehouse_table_path": fabric_io._lakehouse_table_path,
+        })
 
         for message in [
             "No default context found",
