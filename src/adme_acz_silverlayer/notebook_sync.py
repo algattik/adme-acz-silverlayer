@@ -35,6 +35,13 @@ LOCAL_PACKAGE_IMPORT_RE = re.compile(
 )
 
 SHARED_SPARK_HELPERS = {
+    "config": (
+        "NOTEBOOK_PARAMETER_TYPES",
+        "_parameter_bool",
+        "_parameter_int",
+        "_parameter_value",
+        "resolve_notebook_parameters",
+    ),
     "spark_schema": (
         "_JSON_TYPE_MAP",
         "_resolve_node",

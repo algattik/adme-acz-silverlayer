@@ -35,6 +35,7 @@ Schema-declared scalar relationships remain as raw values on parent rows. When `
 ## Repository-specific conventions
 
 - When changing notebook logic that has an extracted helper in `src/adme_acz_silverlayer/`, keep the notebook and helper behavior in sync. Tests such as `test_extracted_modules.py`, `test_runtime_boundary_modules.py`, and `test_runtime_metadata_modules.py` compare extracted notebook functions with package helpers.
+- Keep one assignment-only customer-settings cell tagged `parameters`, with internal constants outside it. Synchronize the typed parameter contract from `config.py`; resolve present environment values before injected values/defaults without mutating the parameter assignments. Fabric collection inputs use JSON strings.
 - Local Spark/Delta test sessions bind their driver and local IP to `127.0.0.1` and set worker Python to the running interpreter. Scope environment patches and cleanup to the test class; an installed but broken runtime fails rather than silently skipping.
 - Tests must run independently of Azure accounts and deployed services. Use mocked authentication and stubbed or local fake ADME endpoints; do not add Azure login requirements or live-tenant test paths.
 - Keep committed notebooks clean: no code-cell outputs, no execution counts, only markdown/code cells, expected headings in order, and no runtime imports from `adme_acz_silverlayer`. Use `scripts\sync_notebook.py --check --summary` before committing notebook edits.

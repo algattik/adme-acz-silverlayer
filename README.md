@@ -110,7 +110,29 @@ TABLE_PREFIX = "test_"
 ALLOW_OVERWRITE = False
 ```
 
-Environment variables can override the same settings for scheduled execution. Use environment overrides for automation; edit the notebook values for first-time interactive onboarding.
+### Notebook parameters and precedence
+
+The customer-settings code cell (including advanced defaults) is tagged `parameters`. Fabric notebook jobs and pipeline Notebook activities can override these assignments by their exact, case-sensitive names, such as `WORKSPACE_ID`, `KINDS`, and `ALLOW_OVERWRITE`. Fabric inserts the supplied assignments after the tagged defaults cell and before configuration resolution. Do not insert another parameter cell. `NOTEBOOK_VERSION` is an internal constant outside the public parameter cell.
+
+Precedence is **present environment variable > injected notebook parameter > edited notebook default**. Environment names are the parameter name prefixed with `ADME_`, except names already starting with `ADME_` remain unchanged: `WORKSPACE_ID` maps to `ADME_WORKSPACE_ID`, whereas `ADME_ENDPOINT` maps to itself. Notebook Base parameters and environment variables are separate mechanisms; passing `ADME_WORKSPACE_ID` as a Base parameter does not set the environment variable. Existing environment-driven scheduled runs remain supported. `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE` take precedence over the legacy environment aliases `ADME_INCREMENTAL` and `ADME_REASSEMBLE`; those aliases take precedence over the corresponding notebook settings.
+
+The plain-Python contract in `src/adme_acz_silverlayer/config.py` validates supplied values and is embedded into the standalone notebook by `scripts/sync_notebook.py`. No package import is required at runtime.
+
+| Parameters | Accepted values |
+| --- | --- |
+| Text settings, IDs, table names and modes | Strings; mode values follow the configuration tables below. Blank optional IDs permit runtime context resolution; blank required names or modes are rejected. |
+| Boolean controls | Python/Fabric booleans or case-insensitive strings `true`/`false`, `yes`/`no`, `y`/`n`, `1`/`0`. Other values fail validation. |
+| `LIMIT`, `ADME_SCHEMA_RETRY_TOTAL` | Nonnegative integers or integer strings. `LIMIT = 0` means unlimited; retry total `0` disables retries. |
+| `DATA_QUALITY_MAX_EXAMPLES`, `METADATA_FLUSH_INTERVAL`, `SCHEMA_FETCH_PARALLELISM`, `WIDE_MAX_CARDINALITY_CAP`, `ADME_SCHEMA_TIMEOUT_SECONDS` | Positive integers or integer strings; zero is rejected rather than clamped. |
+| `OUTPUT_WRITE_PARALLELISM` | `"auto"` or a positive integer/integer string. |
+| `ADME_SCHEMA_RETRY_BACKOFF_SECONDS` | Finite nonnegative number or numeric string. |
+| `KINDS`, `EXCLUDED_KINDS`, `MERGE_KEY_COLUMNS` | Lists of nonempty strings, JSON-array strings, or comma-separated strings. Use JSON strings for Fabric collection inputs, for example `KINDS = '["osdu:wks:master-data--Well:*"]'`. `KINDS` and `MERGE_KEY_COLUMNS` must not be empty. |
+| `KIND_LIMITS` | Object with nonempty string keys and nonnegative integer values, or a JSON-object string such as `'{"WellLog": 100}'`. Legacy `kind=limit` pairs separated by commas/semicolons remain accepted. |
+| `ADME_SCHEMA_RETRY_STATUS_CODES` | List of integer HTTP status codes (100–599), JSON-array string, or comma-separated string. An empty list clears the forced status-code retry list; `Retry-After` handling remains enabled. Set retry total to `0` to disable all retries. |
+
+`False`, zero and empty values are not treated as missing overrides. An empty `TABLE_PREFIX` clears the prefix; empty exclusions or limits clear them. For collection inputs use `[]` or `{}` (or their JSON strings); an empty string also clears optional collections. Empty `KINDS` and merge keys are rejected. A present empty environment value follows the same validation rules instead of falling back to a notebook default. Unset an environment variable to use the notebook parameter. Resolution does not overwrite the parameter-cell values, so rerunning configuration after removing an environment override uses the notebook value. An empty watermark column is accepted only when the watermark mode is not `required`.
+
+Ordinary Jupyter execution evaluates the edited defaults and then the same resolver. Running this whole notebook requires its Fabric/Spark runtime and authentication prerequisites. See [`samples/fabric_pipeline_parameters.json`](samples/fabric_pipeline_parameters.json) for native parameter names and JSON collection examples.
 
 By default, Silver Layer processing transforms only bronze rows where `isActive == true`; rows where `isActive` is `false` or `null` are excluded. Set the advanced `INCLUDE_INACTIVE_RECORDS = True` control, or `ADME_INCLUDE_INACTIVE_RECORDS=true`, only when inactive records should also be transformed.
 
