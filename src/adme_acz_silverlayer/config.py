@@ -29,9 +29,9 @@ NOTEBOOK_PARAMETER_TYPES = {
         "PERSIST_SCHEMA_CACHE", "WRITE_OUTPUT_DOCS", "DATA_QUALITY_CHECKS",
         "CACHE_BRONZE", "PREFLIGHT_KIND_COUNTS", "BATCH_METADATA_WRITES", "SCHEMA_PREFLIGHT",
     ), "boolean"),
-    **dict.fromkeys(("LIMIT", "ADME_SCHEMA_RETRY_TOTAL"), "nonnegative_integer"),
+    **dict.fromkeys(("LIMIT", "ADME_SCHEMA_RETRY_TOTAL", "DATA_QUALITY_MAX_EXAMPLES"), "nonnegative_integer"),
     **dict.fromkeys((
-        "DATA_QUALITY_MAX_EXAMPLES", "METADATA_FLUSH_INTERVAL", "SCHEMA_FETCH_PARALLELISM",
+        "METADATA_FLUSH_INTERVAL", "SCHEMA_FETCH_PARALLELISM",
         "WIDE_MAX_CARDINALITY_CAP", "ADME_SCHEMA_TIMEOUT_SECONDS",
     ), "positive_integer"),
     **dict.fromkeys(("KINDS", "EXCLUDED_KINDS", "MERGE_KEY_COLUMNS"), "string_list"),
@@ -133,16 +133,25 @@ def resolve_notebook_parameters(settings: dict, environment: dict) -> dict:
     missing = NOTEBOOK_PARAMETER_TYPES.keys() - settings.keys()
     if unknown or missing:
         raise ValueError(f"Notebook parameter names mismatch: missing={sorted(missing)}, unknown={sorted(unknown)}.")
+    for retired, replacement in (
+        ("ADME_INCREMENTAL", "ADME_WRITE_MODE"),
+        ("ADME_REASSEMBLE", "ADME_OUTPUT_MODE"),
+    ):
+        if retired in environment:
+            raise ValueError(f"{retired} is no longer supported; unset it and use {replacement}.")
     resolved = {}
     for name, kind in NOTEBOOK_PARAMETER_TYPES.items():
         env_name = name if name.startswith("ADME_") else f"ADME_{name}"
         value = environment[env_name] if env_name in environment else settings[name]
         resolved[name] = _parameter_value(value, name, kind)
-    if "ADME_WRITE_MODE" not in environment and "ADME_INCREMENTAL" in environment:
-        if _parameter_bool(environment["ADME_INCREMENTAL"], "ADME_INCREMENTAL"):
-            resolved["WRITE_MODE"] = "upsert"
-    if "ADME_OUTPUT_MODE" not in environment and "ADME_REASSEMBLE" in environment:
-        resolved["OUTPUT_MODE"] = "wide" if _parameter_bool(environment["ADME_REASSEMBLE"], "ADME_REASSEMBLE") else "normalized"
+        if (
+            name in {"WORKSPACE_ID", "LAKEHOUSE_ID", "ADME_MANAGED_IDENTITY_CLIENT_ID"}
+            and env_name in environment
+            and not resolved[name].strip()
+            and isinstance(settings[name], str)
+            and settings[name].strip()
+        ):
+            raise ValueError(f"{env_name} must not be blank when {name} is configured; unset the environment override.")
     return resolved
 
 

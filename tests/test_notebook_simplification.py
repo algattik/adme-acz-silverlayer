@@ -1289,6 +1289,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             self.nb,
             [
                 "_data_quality_enabled",
+                "_parameter_int",
                 "_data_quality_max_examples",
                 "_data_quality_issues_table_name",
             ],
@@ -1303,7 +1304,7 @@ class NotebookSimplificationTests(unittest.TestCase):
         funcs["_data_quality_issues_table_name"].__globals__["data_quality_issues_table"] = "custom_quality"
 
         self.assertFalse(funcs["_data_quality_enabled"]())
-        self.assertEqual(funcs["_data_quality_max_examples"](), 1)
+        self.assertEqual(funcs["_data_quality_max_examples"](), 0)
         self.assertEqual(funcs["_data_quality_issues_table_name"](), "custom_quality")
 
     def test_performance_configuration_helpers(self) -> None:

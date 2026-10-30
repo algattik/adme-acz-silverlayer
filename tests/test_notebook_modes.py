@@ -963,8 +963,8 @@ class IncrementalConsistencyTests(NotebookIntegrationBase):
             ([self.source()], "Record-Key", "reserved"),
             ([self.source()], "missing_version", "requires"),
         ]
-        for rows, alteration, message in cases:
-            with self.subTest(alteration=alteration, message=message):
+        for (rows, alteration, message), cap in product(cases, (0, 100)):
+            with self.subTest(alteration=alteration, message=message, cap=cap):
                 frame = self.spark.createDataFrame(rows, BRONZE_DDL)
                 if alteration == "missing_version":
                     frame = frame.drop("version")
@@ -972,7 +972,7 @@ class IncrementalConsistencyTests(NotebookIntegrationBase):
                     frame = frame.withColumn(alteration, F.lit("conflict"))
                 frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("osducatalog")
                 with self.assertRaisesRegex(ValueError, message):
-                    run(self.spark, settings)
+                    run(self.spark, {**settings, "DATA_QUALITY_MAX_EXAMPLES": cap, "DATA_QUALITY_CHECKS": cap > 0})
                 self.assertFalse(self.spark.catalog.tableExists(prefix + "osdu_wks_well"))
                 self.assertFalse(self.spark.catalog.tableExists(prefix + "state"))
 
@@ -1893,6 +1893,132 @@ class OutputShapeHelperTests(NotebookIntegrationBase):
         self.assertEqual(0, namespace["write_data_quality_issues"](self.spark, None, "ws", "lh"))
         issues = self.read("silver_data_quality_issues").filter("check_name = 'missing_merge_key_column'")
         self.assertEqual(2, issues.count())
+
+    def test_zero_examples_detect_record_issues_without_emitting_samples(self):
+        cases = [
+            ("clean", [("a", "1", "{}")], "passed"),
+            ("empty", [], "passed"),
+            ("null", [(None, "1", "{}")], "issues_found"),
+            ("duplicate", [("a", "1", "{}"), ("a", "1", "{}")], "issues_found"),
+            ("malformed", [("a", "1", "{broken")], "issues_found"),
+        ]
+        namespace = self.namespace
+        table = "zero_sample_quality"
+        with mock.patch.dict(namespace, {
+            "data_quality_max_examples": 0, "data_quality_checks": True, "data_quality_issues_table": table,
+        }):
+            for (name, records, expected), buffered in product(cases, (False, True)):
+                with self.subTest(case=name, buffered=buffered):
+                    frame = self.spark.createDataFrame(records, "id string, version string, payload string")
+                    buffer = [] if buffered else None
+                    result = namespace["evaluate_and_write_data_quality_issues"](
+                        self.spark, name, WELL_KIND, frame, ["id", "version"], "ws", "lh",
+                        quality_issue_rows=buffer,
+                    )
+                    self.assertEqual((expected, 0), result)
+                    if buffered:
+                        self.assertEqual([], buffer)
+                        namespace["flush_data_quality_issue_rows"](self.spark, buffer, "ws", "lh")
+                    self.assertFalse(self.spark.catalog.tableExists(table))
+
+    def test_structural_quality_diagnostics_are_not_sample_capped(self):
+        namespace = self.namespace
+        frame = self.spark.createDataFrame([], "data__UnlistedA string, data__UnlistedB string")
+        registry = SimpleNamespace(has_kind=lambda kind: True, has_field=lambda kind, field: False)
+        expected = {
+            ("missing_merge_key_column", "id"),
+            ("unresolved_schema_field", "data__UnlistedA"),
+            ("unresolved_schema_field", "data__UnlistedB"),
+        }
+        for cap, buffered in product((0, 1), (False, True)):
+            with self.subTest(cap=cap, buffered=buffered):
+                table = f"structural_quality_{cap}_{int(buffered)}"
+                with mock.patch.dict(namespace, {
+                    "data_quality_max_examples": cap, "data_quality_checks": True, "data_quality_issues_table": table,
+                }):
+                    buffer = [] if buffered else None
+                    result = namespace["evaluate_and_write_data_quality_issues"](
+                        self.spark, "structural", WELL_KIND, frame, ["id"], "ws", "lh",
+                        registry=registry, quality_issue_rows=buffer,
+                    )
+                    self.assertEqual(("issues_found", 3), result)
+                    if buffered:
+                        self.assertEqual(3, len(buffer))
+                        namespace["flush_data_quality_issue_rows"](self.spark, buffer, "ws", "lh")
+                        self.assertEqual([], buffer)
+                    issues = self.read(table).collect()
+                    self.assertEqual(expected, {(issue.check_name, issue.column_name) for issue in issues})
+                    self.assertTrue(all(issue.source_id is None and issue.source_version is None for issue in issues))
+
+    def test_positive_example_caps_apply_per_check_and_column(self):
+        namespace = self.namespace
+        records = [(f"record-{i}", "1", "{broken", "[broken") for i in range(4) for _ in range(2)]
+        records.extend((None, str(i), "{broken", "[broken") for i in range(4))
+        frame = self.spark.createDataFrame(records, "id string, version string, payload string, extra string")
+        expected = {
+            ("null_merge_key", "id"): 2,
+            ("duplicate_merge_key", "id,version"): 2,
+            ("malformed_json", "payload"): 2,
+            ("malformed_json", "extra"): 2,
+        }
+        for buffered in (False, True):
+            with self.subTest(buffered=buffered):
+                table = f"positive_sample_quality_{int(buffered)}"
+                with mock.patch.dict(namespace, {
+                    "data_quality_max_examples": 2, "data_quality_checks": True, "data_quality_issues_table": table,
+                }):
+                    buffer = [] if buffered else None
+                    result = namespace["evaluate_and_write_data_quality_issues"](
+                        self.spark, "positive", WELL_KIND, frame, ["id", "version"], "ws", "lh",
+                        quality_issue_rows=buffer,
+                    )
+                    self.assertEqual(("issues_found", 8), result)
+                    if buffered:
+                        namespace["flush_data_quality_issue_rows"](self.spark, buffer, "ws", "lh")
+                    counts = self.read(table).groupBy("check_name", "column_name").count().collect()
+                    self.assertEqual(expected, {(r.check_name, r.column_name): r["count"] for r in counts})
+                    duplicate = self.read(table).where("check_name = 'duplicate_merge_key'").first()
+                    self.assertEqual(WELL_KIND, duplicate.source_kind)
+                    self.assertEqual("1", duplicate.source_version)
+                    self.assertIn(duplicate.source_id, duplicate.issue_detail)
+
+    def test_disabled_quality_checks_do_not_detect_or_emit(self):
+        namespace = self.namespace
+        frame = self.spark.createDataFrame([(None, "{broken")], "id string, payload string")
+        for cap, buffered in product((0, 1), (False, True)):
+            with self.subTest(cap=cap, buffered=buffered), mock.patch.dict(namespace, {
+                "data_quality_max_examples": cap, "data_quality_checks": False,
+                "collect_data_quality_issues": mock.Mock(side_effect=AssertionError("disabled checks evaluated")),
+            }):
+                buffer = [] if buffered else None
+                self.assertEqual(
+                    ("disabled", 0),
+                    namespace["evaluate_and_write_data_quality_issues"](
+                        self.spark, "disabled", WELL_KIND, frame, ["id", "version"], "ws", "lh",
+                        quality_issue_rows=buffer,
+                    ),
+                )
+                if buffered:
+                    self.assertEqual([], buffer)
+
+    def test_zero_example_status_reaches_run_metadata(self):
+        from pyspark.sql import functions as F
+
+        frame = self.spark.createDataFrame([row("test:well:quality", "1", {"FacilityName": "Alpha"})], BRONZE_DDL)
+        frame.withColumn("createUser", F.lit("{broken")).write.format("delta").mode("overwrite").saveAsTable("osducatalog")
+        namespace = run(self.spark, {
+            "RUN_PROFILE": "execute", "KINDS": [WELL_KIND], "TABLE_PREFIX": "zero_status_",
+            "WRITE_MODE": "full_refresh", "VERSION_STRATEGY": "merge",
+            "DATA_QUALITY_MAX_EXAMPLES": 0, "DATA_QUALITY_ISSUES_TABLE": "zero_status_quality",
+        })
+        result = namespace["results"][0]
+        self.assertEqual(("issues_found", 0), (result.quality_status, result.quality_issue_count))
+        run_id = self.read("silver_run_manifest").where(F.col("parent_table") == result.parent_table).first().run_id
+        for table in ("silver_run_info", "silver_run_manifest"):
+            metadata = self.read(table).where(F.col("run_id") == run_id).collect()
+            self.assertTrue(metadata)
+            self.assertTrue(all((r.quality_status, r.quality_issue_count) == ("issues_found", 0) for r in metadata))
+        self.assertFalse(self.spark.catalog.tableExists("zero_status_quality"))
 
 
 if __name__ == "__main__":

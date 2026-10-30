@@ -114,7 +114,7 @@ ALLOW_OVERWRITE = False
 
 The customer-settings code cell (including advanced defaults) is tagged `parameters`. Fabric notebook jobs and pipeline Notebook activities can override these assignments by their exact, case-sensitive names, such as `WORKSPACE_ID`, `KINDS`, and `ALLOW_OVERWRITE`. Fabric inserts the supplied assignments after the tagged defaults cell and before configuration resolution. Do not insert another parameter cell. `NOTEBOOK_VERSION` is an internal constant outside the public parameter cell.
 
-Precedence is **present environment variable > injected notebook parameter > edited notebook default**. Environment names are the parameter name prefixed with `ADME_`, except names already starting with `ADME_` remain unchanged: `WORKSPACE_ID` maps to `ADME_WORKSPACE_ID`, whereas `ADME_ENDPOINT` maps to itself. Notebook Base parameters and environment variables are separate mechanisms; passing `ADME_WORKSPACE_ID` as a Base parameter does not set the environment variable. Existing environment-driven scheduled runs remain supported. `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE` take precedence over the legacy environment aliases `ADME_INCREMENTAL` and `ADME_REASSEMBLE`; those aliases take precedence over the corresponding notebook settings.
+Precedence is **present environment variable > injected notebook parameter > edited notebook default**. Environment names are the parameter name prefixed with `ADME_`, except names already starting with `ADME_` remain unchanged: `WORKSPACE_ID` maps to `ADME_WORKSPACE_ID`, whereas `ADME_ENDPOINT` maps to itself. Notebook Base parameters and environment variables are separate mechanisms; passing `ADME_WORKSPACE_ID` as a Base parameter does not set the environment variable. Environment-driven scheduled runs use explicit `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE` settings.
 
 The plain-Python contract in `src/adme_acz_silverlayer/config.py` validates supplied values and is embedded into the standalone notebook by `scripts/sync_notebook.py`. No package import is required at runtime.
 
@@ -123,7 +123,8 @@ The plain-Python contract in `src/adme_acz_silverlayer/config.py` validates supp
 | Text settings, IDs, table names and modes | Strings; mode values follow the configuration tables below. Blank optional IDs permit runtime context resolution; blank required names or modes are rejected. |
 | Boolean controls | Python/Fabric booleans or case-insensitive strings `true`/`false`, `yes`/`no`, `y`/`n`, `1`/`0`. Other values fail validation. |
 | `LIMIT`, `ADME_SCHEMA_RETRY_TOTAL` | Nonnegative integers or integer strings. `LIMIT = 0` means unlimited; retry total `0` disables retries. |
-| `DATA_QUALITY_MAX_EXAMPLES`, `METADATA_FLUSH_INTERVAL`, `SCHEMA_FETCH_PARALLELISM`, `WIDE_MAX_CARDINALITY_CAP`, `ADME_SCHEMA_TIMEOUT_SECONDS` | Positive integers or integer strings; zero is rejected rather than clamped. |
+| `DATA_QUALITY_MAX_EXAMPLES` | Nonnegative integer or integer string; default `100`. Zero disables record examples, not quality checks. |
+| `METADATA_FLUSH_INTERVAL`, `SCHEMA_FETCH_PARALLELISM`, `WIDE_MAX_CARDINALITY_CAP`, `ADME_SCHEMA_TIMEOUT_SECONDS` | Positive integers or integer strings; zero is rejected rather than clamped. |
 | `OUTPUT_WRITE_PARALLELISM` | `"auto"` or a positive integer/integer string. |
 | `ADME_SCHEMA_RETRY_BACKOFF_SECONDS` | Finite nonnegative number or numeric string. |
 | `KINDS`, `EXCLUDED_KINDS`, `MERGE_KEY_COLUMNS` | Lists of nonempty strings, JSON-array strings, or comma-separated strings. Use JSON strings for Fabric collection inputs, for example `KINDS = '["osdu:wks:master-data--Well:*"]'`. `KINDS` and `MERGE_KEY_COLUMNS` must not be empty. |
@@ -131,6 +132,8 @@ The plain-Python contract in `src/adme_acz_silverlayer/config.py` validates supp
 | `ADME_SCHEMA_RETRY_STATUS_CODES` | List of integer HTTP status codes (100–599), JSON-array string, or comma-separated string. An empty list clears the forced status-code retry list; `Retry-After` handling remains enabled. Set retry total to `0` to disable all retries. |
 
 `False`, zero and empty values are not treated as missing overrides. An empty `TABLE_PREFIX` clears the prefix; empty exclusions or limits clear them. For collection inputs use `[]` or `{}` (or their JSON strings); an empty string also clears optional collections. Empty `KINDS` and merge keys are rejected. A present empty environment value follows the same validation rules instead of falling back to a notebook default. Unset an environment variable to use the notebook parameter. Resolution does not overwrite the parameter-cell values, so rerunning configuration after removing an environment override uses the notebook value. An empty watermark column is accepted only when the watermark mode is not `required`.
+
+Blank environment values cannot clear configured workspace, lakehouse, or managed-identity client IDs; unset the override instead.
 
 Ordinary Jupyter execution evaluates the edited defaults and then the same resolver. Running this whole notebook requires its Fabric/Spark runtime and authentication prerequisites. See [`samples/fabric_pipeline_parameters.json`](samples/fabric_pipeline_parameters.json) for native parameter names and JSON collection examples.
 
@@ -163,7 +166,7 @@ Leave advanced settings at their defaults unless one of these needs applies.
 
 `ADME_TOKEN_SCOPE = "https://management.core.windows.net/.default"` and `ADME_DEVICE_CODE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"` are static authentication constants in the notebook, not customer-specific tenant settings.
 
-`ADME_INCREMENTAL` and `ADME_REASSEMBLE` are still accepted as compatibility aliases for older scheduled runs. Prefer `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE` for new runs.
+Replace retired `ADME_INCREMENTAL` and `ADME_REASSEMBLE` environment variables with `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE`, respectively.
 
 ### Migrating existing automation
 
@@ -427,7 +430,7 @@ After a successful run, review:
 - `silver_run_info` for run status, record counts, failures, schema access details, watermark settings, and stage timings.
 - `silver_run_manifest` for produced table names, output mode, write mode, schema versions, row counts, config hash, active-record filter behavior, relationship-bridge enablement, and status.
 - `silver_run_status` for finalization diagnostics. A completed execution requires both its latest `committed` run status and `status = 'committed'` in `silver_publication_attempts`; a status row alone does not authorize progress.
-- `silver_data_quality_issues` for capped examples of non-blocking quality findings such as missing/null/duplicate merge keys, malformed JSON-looking values, and columns not present in the resolved schema. `quality_status` and `quality_issue_count` are also written to run metadata.
+- `silver_data_quality_issues` for record examples capped per check/column, plus uncapped missing-column and schema warnings. `quality_status` and `quality_issue_count` are also written to run metadata.
 - `silver_schema_cache` when persisted schema caching is enabled.
 - `silver_incremental_state` for context-scoped progress whose attempt is committed.
 - `silver_publication_attempts`, `silver_output_ownership`, and `silver_writer_guard` for snapshot replay, pre-write output inventory, and destination-wide writer ownership.
@@ -435,6 +438,8 @@ After a successful run, review:
 - The Results summary cell for per-kind status, rows, parent table, separate array-child and relationship-bridge counts, validation, and errors. Its bridge inventory deduplicates shared table names and lists source kinds, parents, and processing statuses. It uses existing results without scanning Delta: it does not report bridge row counts or independently certify publication.
 
 A successful result with `records_processed = 0` and `schema_mode = "dependency_refresh"` identifies relationship-only maintenance. Dry-run output explicitly identifies dependency maintenance; it reads current Bronze, so its row preview is not a promise about a pending attempt's retained replay snapshot.
+
+`quality_issue_count` counts diagnostic rows, not all affected records. With zero examples, `issues_found` can therefore accompany a zero count. Existing diagnostics are retained.
 
 ## Monitoring examples
 
@@ -505,7 +510,7 @@ Wide output expands struct-array children up to `WIDE_MAX_CARDINALITY_CAP` posit
 | Watermark filtering is not active | Confirm `WRITE_MODE = "upsert"`, verify `ingestTime` exists in bronze or override `INCREMENTAL_WATERMARK_COLUMN`, and use `INCREMENTAL_WATERMARK_MODE = "required"` if fallback processing should fail. |
 | Watermark upsert refuses to run with limits | Remove `LIMIT` and `KIND_LIMITS`, or set `INCREMENTAL_WATERMARK_MODE = "off"` for bounded test runs that should not advance watermark state. |
 | Outputs are not marked committed | Check the latest `silver_run_status` and the matching `silver_publication_attempts` row. Both must be `committed`. Otherwise treat outputs as partial, repair the reported failure, and retry with the original configuration. |
-| Data-quality issues are reported | Review `silver_data_quality_issues` and the `quality_status` / `quality_issue_count` fields in run metadata. Findings are non-blocking examples capped by `DATA_QUALITY_MAX_EXAMPLES`; fix source data or merge-key configuration when severity is `error`. |
+| Data-quality issues are reported | Review `silver_data_quality_issues` and `quality_status` in run metadata; fix source data or merge-key configuration when severity is `error`. |
 | Output table shape is too normalized | Use `OUTPUT_MODE = "wide"` to create one wide table per selected kind. |
 | Wide output has too many or too few repeated columns | Tune `WIDE_MAX_CARDINALITY_CAP`, or switch to normalized output for array-heavy entities. |
 | Output tables are overwritten unexpectedly | Check `RUN_PROFILE`, `WRITE_MODE`, environment overrides, and `ALLOW_OVERWRITE` before running with `RUN_PROFILE = "execute"`. |
